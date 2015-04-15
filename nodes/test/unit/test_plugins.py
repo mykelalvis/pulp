@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import os
 import sys
 import tempfile
@@ -19,6 +6,7 @@ import random
 import tarfile
 
 from copy import deepcopy
+from unittest import TestCase
 
 from mock import Mock, patch
 from base import WebTest
@@ -28,7 +16,8 @@ from nectar.config import DownloaderConfig
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/mocks")
 
-from pulp_node.distributors.http.distributor import NodesHttpDistributor, entry_point as dist_entry_point
+from pulp_node.distributors.http.distributor import (NodesHttpDistributor,
+                                                     entry_point as dist_entry_point)
 from pulp_node.importers.http.importer import NodesHttpImporter, entry_point as imp_entry_point
 from pulp_node.profilers.nodes import NodeProfiler, entry_point as profiler_entry_point
 from pulp_node.handlers.handler import NodeHandler, RepositoryHandler
@@ -48,16 +37,11 @@ from pulp.plugins.util.nectar_config import importer_config_to_nectar_config
 from pulp.common.plugins import importer_constants
 from pulp.common.config import Config
 from pulp.server.managers import factory as managers
-from pulp.server.content.sources import Request as DownloadRequest
-from pulp.bindings.bindings import Bindings
-from pulp.bindings.server import PulpConnection
+from pulp.server.content.sources.model import Request as DownloadRequest
 from pulp.server.config import config as pulp_conf
 from pulp.agent.lib.conduit import Conduit
-from pulp.agent.lib.container import CONTENT, Container
-from pulp.agent.lib.dispatcher import Dispatcher
 from pulp_node.manifest import Manifest, RemoteManifest, MANIFEST_FILE_NAME, UNITS_FILE_NAME
 from pulp_node.handlers.strategies import Mirror, Additive
-from pulp_node.handlers.reports import RepositoryReport
 from pulp_node import error
 from pulp_node import constants
 from pulp_node import pathlib
@@ -81,8 +65,6 @@ REPO_DESCRIPTION = 'full of goodness'
 REPO_NOTES = {'the answer to everything': 42}
 REPO_SCRATCHPAD = {'a': 1, 'b': 2}
 
-# --- testing mock classes ---------------------------------------------------
-
 
 class Repository(object):
 
@@ -96,9 +78,9 @@ class FakeDistributor(object):
     @classmethod
     def metadata(cls):
         return {
-            'id' : FAKE_DISTRIBUTOR,
-            'display_name' : 'Fake Distributor',
-            'types' : ['node',]
+            'id': FAKE_DISTRIBUTOR,
+            'display_name': 'Fake Distributor',
+            'types': ['node']
         }
 
     def validate_config(self, *unused):
@@ -142,6 +124,7 @@ class BadDownloadRequest(DownloadRequest):
     def __init__(self, *args, **kwargs):
         DownloadRequest.__init__(self, *args, **kwargs)
         self.url = 'http:/NOWHERE/FAIL_ME_%f' % random.random()
+
 
 class AgentConduit(Conduit):
 
@@ -277,14 +260,11 @@ class PluginTestBase(WebTest):
 
     def dist_conf(self):
         return {
-            'protocol':'file',
-            'http':{'alias':self.alias},
-            'https':{'alias':self.alias},
-            'file':{'alias':self.alias},
+            'protocol': 'file',
+            'http': {'alias': self.alias},
+            'https': {'alias': self.alias},
+            'file': {'alias': self.alias},
         }
-
-
-# --- handler tests ------------------------------------------------
 
 
 class AgentHandlerTest(PluginTestBase):
@@ -325,32 +305,88 @@ class AgentHandlerTest(PluginTestBase):
 # --- pulp plugin tests --------------------------------------------
 
 
-class TestProfiler(PluginTestBase):
+class TestProfiler(TestCase):
 
     def test_entry_point(self):
         _class, conf = profiler_entry_point()
         plugin = _class()
+        self.assertEqual(conf, {})
         self.assertTrue(isinstance(plugin, NodeProfiler))
 
-    @patch('pulp_node.resources.node_configuration')
-    def test_update_units(self, mock_get_node_conf):
-        # Setup
-        mock_get_node_conf.return_value = self.node_configuration()
-        # Test
-        host = 'abc'
-        port = 443
-        units = [1, 2, 3]
+    @patch('pulp_node.profilers.nodes._')
+    def test_metadata(self, gettext):
+        self.assertEqual(
+            NodeProfiler.metadata(),
+            {
+                'id': constants.PROFILER_ID,
+                'display_name': gettext.return_value,
+                'types': [constants.NODE_SCOPE, constants.REPOSITORY_SCOPE]
+            })
+
+    @patch('__builtin__.open')
+    @patch('pulp_node.profilers.nodes.read_config')
+    @patch('pulp_node.profilers.nodes.pulp_conf')
+    def test_inject_parent_settings(self, _pulp_conf, _read_config, _open):
+        host = 'test-host'
+        cert_path = '/path/cert'
+
+        _pulp_conf.get.return_value = host
+        _read_config.return_value.main = Mock(node_certificate=cert_path)
+
+        fp = Mock()
+        fp.__enter__ = Mock(return_value=fp)
+        fp.__exit__ = Mock()
+        _open.return_value = fp
+
+        # test
         options = {}
-        p = NodeProfiler()
-        pulp_conf.set('server', 'server_name', host)
-        _units = p.update_units(None, units, options, None, None)
-        # Verify
-        self.assertTrue(constants.PARENT_SETTINGS in options)
+        NodeProfiler._inject_parent_settings(options)
+
+        # validation
+        _pulp_conf.get.assert_called_once_with('server', 'server_name')
+        _read_config.assert_called_once_with()
+        _open.assert_called_once_with(cert_path)
         settings = options[constants.PARENT_SETTINGS]
         self.assertEqual(settings[constants.HOST], host)
-        self.assertEqual(settings[constants.PORT], port)
-        self.assertEqual(settings[constants.NODE_CERTIFICATE], NODE_CERTIFICATE)
-        self.assertEqual(units, _units)
+        self.assertEqual(settings[constants.PORT], 443)
+        self.assertEqual(
+            settings[constants.NODE_CERTIFICATE],
+            _open.return_value.read.return_value)
+
+    @patch('pulp_node.profilers.nodes.managers')
+    def test_inject_strategy(self, managers):
+        consumer_id = 'test-consumer'
+        strategy = 'test-strategy'
+        notes = {constants.STRATEGY_NOTE_KEY: strategy}
+        manager = Mock()
+        manager.get_consumer.return_value = {'notes': notes}
+        managers.consumer_manager.return_value = manager
+
+        # test
+        options = {}
+        NodeProfiler._inject_strategy(consumer_id, options)
+
+        # validation
+        manager.get_consumer.assert_called_once_with(consumer_id)
+        self.assertEqual(options[constants.STRATEGY_KEYWORD], strategy)
+
+    def test_update_units(self):
+        consumer = Mock(id='123')
+        units = [1, 2, 3]
+        options = {}
+        config = Mock()
+        conduit = Mock()
+
+        # test
+        profiler = NodeProfiler()
+        profiler._inject_parent_settings = Mock()
+        profiler._inject_strategy = Mock()
+
+        # validation
+        _units = profiler.update_units(consumer, units, options, config, conduit)
+        profiler._inject_parent_settings.assert_called_once_with(options)
+        profiler._inject_strategy.assert_called_once_with(consumer.id, options)
+        self.assertEqual(_units, units)
 
 
 class TestDistributor(PluginTestBase):
@@ -521,6 +557,25 @@ class TestDistributor(PluginTestBase):
                 self.assertEqual(created[p], v)
             self.assertEqual(created.get('_storage_path'), unit['storage_path'])
             self.assertEqual(unit['type_id'], self.UNIT_TYPE_ID)
+
+    def test_get_publish_dir(self):
+        dist = NodesHttpDistributor()
+        repo = plugin_model.Repository(self.REPO_ID)
+        config = PluginCallConfiguration(self.VALID_CONFIGURATION, {})
+
+        ret = dist._get_publish_dir(repo.id, config)
+
+        self.assertEqual(ret, '/var/www/pulp/nodes/https/repos/%s' % repo.id)
+
+    @patch('os.system', spec_set=True)
+    def test_distributor_removed(self, mock_system):
+        dist = NodesHttpDistributor()
+        repo = plugin_model.Repository(self.REPO_ID)
+        config = PluginCallConfiguration(self.VALID_CONFIGURATION, {})
+
+        dist.distributor_removed(repo, config)
+
+        mock_system.assert_called_once_with('rm -rf /var/www/pulp/nodes/https/repos/%s' % repo.id)
 
 
 class ImporterTest(PluginTestBase):
@@ -893,876 +948,3 @@ class ImporterTest(PluginTestBase):
         # Verify
         unit = collection.find_one({'N': 0})
         self.assertEqual(unit['age'], 42)
-
-
-# --- testing end-to-end -----------------------------------------------------
-
-class TestEndToEnd(PluginTestBase):
-    """
-    These tests perform end-to-end testing using a pulp server as both the parent and child.
-    Then, we basically synchronize the server to itself.
-    Here is how it works:
-      1. Create (2) directories in /tmp that act as the storage location for the parent and child
-      2. Populate a pulp sever with repositories and content units using the 'parent'
-         storage directory as the _storage_path.
-      3. Mock the strategies to point to our testing classes.  Their job is to act as a hook into
-         the synchronization process.  At this hook, we transform the pulp server that had been
-         acting as our parent into our child node.  The transformation is mainly removing specified
-         items from the inventory to simulate certain senarios.
-      4. Initiate the node synchronization.
-      5. Verify the result.
-
-    File system tree (example):
-
-            nodes/
-            ├── child-2BUtUa
-            │   ├── content
-            │   │   └── test_unit.rpm
-            │   └── working
-            │       └── repos
-            │           └── test-repo
-            │               ├── distributors
-            │               │   └── nodes_http_distributor
-            │               └── importers
-            │                   └── nodes_http_importer
-            ├── storage
-            └── Parent-SgASM7
-                ├── content
-                │   └── test_unit.rpm
-                ├── test-repo
-                │   ├── content
-                │   │   └── 3ae69ea97c -> /tmp/pulp/nodes/Parent-SgASM7/content/test_unit.rpm
-                │   └── units.json
-                └── working
-                    └── repos
-                        └── test-repo
-                            ├── distributors
-                            │   └── nodes_http_distributor
-                            └── importers
-                                └── nodes_http_importer
-
-    """
-
-    PULP_ID = 'child'
-
-    def populate(self, strategy=constants.DEFAULT_STRATEGY):
-        PluginTestBase.populate(self)
-        # register child
-        manager = managers.consumer_manager()
-        manager.register(self.PULP_ID)
-        manager = managers.repo_importer_manager()
-        # add importer
-        importer_conf = {
-            constants.MANIFEST_URL_KEYWORD: 'http://redhat.com',
-            constants.STRATEGY_KEYWORD: constants.DEFAULT_STRATEGY,
-        }
-        manager.set_importer(self.REPO_ID, constants.HTTP_IMPORTER, importer_conf)
-        # add distributors
-        dist_conf = self.dist_conf()
-        manager = managers.repo_distributor_manager()
-        manager.add_distributor(
-            self.REPO_ID,
-            constants.HTTP_DISTRIBUTOR,
-            dist_conf,
-            False,
-            constants.HTTP_DISTRIBUTOR)
-        manager.add_distributor(self.REPO_ID, FAKE_DISTRIBUTOR, FAKE_DISTRIBUTOR_CONFIG, False, FAKE_ID)
-        # bind
-        conf = {constants.STRATEGY_KEYWORD: strategy}
-        manager = managers.consumer_bind_manager()
-        manager.bind(self.PULP_ID, self.REPO_ID, constants.HTTP_DISTRIBUTOR, False, conf)
-
-    def clean(self,
-              repo=True,
-              units=True,
-              plugins=False,
-              extra_units=0,
-              extra_repos=None,
-              dist_config=None):
-        # remove repository & bindings
-        if repo:
-            Bind.get_collection().remove()
-            Repo.get_collection().remove()
-            RepoDistributor.get_collection().remove()
-            RepoImporter.get_collection().remove()
-        # remove all content units
-        if units:
-            RepoContentUnit.get_collection().remove()
-            unit_db.clean()
-            self.define_plugins()
-        # add extra content units
-        if extra_units:
-            self.add_units(self.NUM_UNITS, self.NUM_UNITS + extra_units)
-        # add extra repositories
-        if extra_repos:
-            manager = managers.repo_manager()
-            for repo_id in extra_repos:
-                manager.create_repo(repo_id)
-        # distributor config changed
-        if dist_config is not None:
-            manager = managers.repo_distributor_manager()
-            manager.update_distributor_config(self.REPO_ID, FAKE_ID, dist_config)
-        # clear pulp plugins
-        if plugins:
-            plugin_api._MANAGER.distributors.plugins = {}
-
-    def verify(self, num_units=PluginTestBase.NUM_UNITS):
-        # repository
-        manager = managers.repo_query_manager()
-        repository = manager.get_repository(self.REPO_ID)
-        self.assertEqual(repository['description'], REPO_DESCRIPTION)
-        self.assertEqual(repository['display_name'], REPO_NAME)
-        self.assertEqual(repository['notes'], REPO_NOTES)
-        self.assertEqual(repository['scratchpad'], REPO_SCRATCHPAD)
-        # importer
-        manager = managers.repo_importer_manager()
-        importer = manager.get_importer(self.REPO_ID)
-        manifest_url = importer['config'][constants.MANIFEST_URL_KEYWORD]
-        self.assertTrue(manifest_url.endswith('%s/manifest.json' % self.REPO_ID))
-        # distributor
-        manager = managers.repo_distributor_manager()
-        manager.get_distributor(self.REPO_ID, FAKE_ID)
-        # check units
-        manager = managers.repo_unit_association_query_manager()
-        units = manager.get_units(self.REPO_ID)
-        #units = dict([(u['metadata']['N'], u) for u in units])
-        self.assertEqual(len(units), num_units)
-        for unit in units:
-            metadata = unit['metadata']
-            unit_id = self.UNIT_ID % metadata['N']  # injected by test
-            storage_path = metadata['_storage_path']
-            if not storage_path:
-                # no file associated with the unit
-                continue
-            storage_path = storage_path.replace('//', '/')
-            self.assertEqual(unit['unit_type_id'], self.UNIT_TYPE_ID)
-            self.assertEqual(unit['repo_id'], self.REPO_ID)
-            self.assertEqual(unit['owner_id'], constants.HTTP_IMPORTER)
-            file_path = '.'.join((unit_id, self.UNIT_TYPE_ID))
-            self.assertEqual(storage_path, os.path.join(self.childfs, 'content', file_path))
-            self.assertTrue(os.path.exists(storage_path))
-            if os.path.isfile(storage_path):
-                fp = open(storage_path)
-                content = fp.read()
-                fp.close()
-                self.assertEqual(content, unit_id)
-            else:
-                self.assertTrue(os.path.isdir(storage_path))
-                self.assertEqual(len(os.listdir(storage_path)), 4)
-
-    def test_handler_mirror(self):
-        """
-        Test end-to-end functionality using the mirroring strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-                constants.PURGE_ORPHANS_KEYWORD: True,
-            }
-            units = [{'type_id':'node', 'unit_key':None}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['node']
-        self.assertTrue(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        diff = 'diff %s/content %s/content &> /dev/null' % (self.parentfs, self.childfs)
-        self.assertEqual(os.system(diff), 0)
-        self.verify()
-
-    def test_handler_cancelled(self):
-        """
-        Test end-to-end functionality using the mirroring strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self))
-        @patch('pulp.agent.lib.conduit.Conduit.cancelled', return_value=True)
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-                constants.PURGE_ORPHANS_KEYWORD: True,
-            }
-            units = [{'type_id':'node', 'unit_key':None}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['node']
-        self.assertTrue(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.CANCELLED)
-        units = repository['units']
-        self.assertEqual(units['added'], 0)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-
-    @patch('pulp_node.importers.http.importer.NodesHttpImporter.sync_repo')
-    def test_handler_content_skip(self, mock_importer):
-        """
-        Test end-to-end functionality using the mirroring strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self))
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-                constants.SKIP_CONTENT_UPDATE_KEYWORD: True
-            }
-            units = [{'type_id': 'node', 'unit_key': None}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['node']
-        self.assertTrue(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        self.assertEqual(units['added'], 0)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.assertFalse(mock_importer.called)
-
-    def test_handler_additive(self):
-        """
-        Test end-to-end functionality using the additive strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy',
-               return_value=AdditiveTestStrategy(self, extra_repos=self.EXTRA_REPO_IDS))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.ADDITIVE_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.ADDITIVE_STRATEGY,
-            }
-            units = [{'type_id':'node', 'unit_key':None}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['node']
-        self.assertTrue(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify()
-        manager = managers.repo_query_manager()
-        all = manager.find_all()
-        self.assertEqual(len(all), 1 + len(self.EXTRA_REPO_IDS))
-
-    def test_handler_mirror_repository_scope(self):
-        """
-        Test end-to-end functionality using the mirror strategy and
-        invoke using 'repository' units.  The goal is to make sure that the
-        extra repositories are not affected.  Behaves like the additive strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy',
-               return_value=AdditiveTestStrategy(self, extra_repos=self.EXTRA_REPO_IDS))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            units = [{'type_id': 'repository', 'unit_key': {'repo_id': self.REPO_ID}}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['repository']
-        self.assertTrue(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify()
-        manager = managers.repo_query_manager()
-        all = manager.find_all()
-        self.assertEqual(len(all), 1 + len(self.EXTRA_REPO_IDS))
-
-    def test_handler_merge(self):
-        """
-        Test end-to-end functionality using the mirror strategy. We don't clean the repositories
-        to they will be merged instead of added as new.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy',
-               return_value=MirrorTestStrategy(self, repo=False, units=True))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertTrue(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.MERGED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify()
-
-    def test_handler_merge_dist_changed(self):
-        """
-        Test end-to-end functionality using the mirror strategy. We don't clean the repositories
-        to they will be merged instead of added as new.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy',
-               return_value=MirrorTestStrategy(self, repo=False, units=True, dist_config={'A': 1}))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertTrue(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.MERGED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify()
-        manager = managers.repo_distributor_manager()
-        dist = manager.get_distributor(self.REPO_ID, FAKE_ID)
-        self.assertEqual(dist['config'], FAKE_DISTRIBUTOR_CONFIG)
-
-    def test_handler_merge_and_delete_extra_units(self):
-        """
-        Test end-to-end functionality using the mirror strategy.  We only clean the units so
-        the repositories will be merged.  During the clean, we add units on the child that are
-        not on the parent and expect them to be removed by the mirror strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy',
-               return_value=MirrorTestStrategy(self, repo=False, extra_units=self.NUM_EXTRA_UNITS))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertTrue(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.MERGED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], self.NUM_EXTRA_UNITS)
-        self.verify()
-
-    def test_handler_merge_and_delete_repositories(self):
-        """
-        Test end-to-end functionality using the mirror strategy.  We only clean the units so
-        the repositories will be merged.  During the clean, we add repositories on the child that
-        are not on the parent and expect them to be removed by the mirror strategy.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy',
-               return_value=MirrorTestStrategy(self, repo=False, units=True, extra_repos=self.EXTRA_REPO_IDS))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertTrue(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), len(self.EXTRA_REPO_IDS) + 1)
-        # merged repository
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.MERGED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        # deleted extra repositories
-        for i in range(0, len(self.EXTRA_REPO_IDS)):
-            repository = repositories[i + 1]
-            self.assertEqual(repository['repo_id'], self.EXTRA_REPO_IDS[i])
-            self.assertEqual(repository['action'], RepositoryReport.DELETED)
-            units = repository['units']
-            self.assertEqual(units['added'], 0)
-            self.assertEqual(units['updated'], 0)
-            self.assertEqual(units['removed'], 0)
-        # verify end result
-        self.verify()
-
-    def test_handler_unit_errors(self):
-        """
-        Test end-to-end functionality using the additive strategy with unit download errors.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.importers.download.Request', BadDownloadRequest)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.ADDITIVE_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            os.makedirs(os.path.join(self.childfs, 'content'))
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertFalse(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 5)
-        self.assertEqual(errors[0]['error_id'], error.UnitDownloadError.ERROR_ID)
-        self.assertEqual(errors[0]['details']['repo_id'], self.REPO_ID)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        num_units_added = self.NUM_UNITS / 2
-        self.assertEqual(units['added'], num_units_added)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify(num_units_added)
-
-    def test_handler_nothing_updated(self):
-        """
-        Test end-to-end functionality using the additive strategy with nothing updated.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.importers.download.Request', BadDownloadRequest)
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.ADDITIVE_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            os.makedirs(os.path.join(self.childfs, 'content'))
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertTrue(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.MERGED)
-        units = repository['units']
-        self.assertEqual(units['added'], 0)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-
-    @patch('pulp_node.importers.strategies.Mirror._add_units', side_effect=Exception())
-    def test_importer_exception(self, *unused):
-        """
-        Test end-to-end functionality using the mirror strategy with an importer exception
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            cfg = self.dist_conf()
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, cfg)
-            units = []
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            handler = NodeHandler(self)
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            os.makedirs(os.path.join(self.childfs, 'content'))
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = handler.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0]
-        self.assertFalse(report.succeeded)
-        errors = report.details['errors']
-        repositories = report.details['repositories']
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0]['error_id'], error.CaughtException.ERROR_ID)
-        self.assertEqual(errors[0]['details']['repo_id'], self.REPO_ID)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        self.assertEqual(units['added'], 0)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify(0)
-
-    def test_missing_plugins(self):
-        """
-        Test end-to-end functionality using the mirror strategy with missing distributor plugins.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self, plugins=True))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.MIRROR_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.MIRROR_STRATEGY,
-            }
-            units = [{'type_id':'node', 'unit_key':None}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['node']
-        self.assertFalse(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0]['error_id'], error.DistributorNotInstalled.ERROR_ID)
-        self.assertEqual(errors[0]['details']['repo_id'], self.REPO_ID)
-        self.assertEqual(errors[0]['details']['type_id'], 'test_distributor')
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.PENDING)
-        units = repository['units']
-        self.assertEqual(units['added'], 0)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-
-    def test_repository_handler(self):
-        """
-        Test end-to-end functionality using the mirror strategy. We add extra repositories on the
-        child that are not on the parent and expect them to be preserved.
-        """
-        _report = []
-        conn = PulpConnection(None, server_wrapper=self)
-        binding = Bindings(conn)
-        @patch('pulp_node.resources.pulp_bindings', return_value=binding)
-        @patch('pulp_node.resources.parent_bindings', return_value=binding)
-        @patch('pulp_node.handlers.handler.find_strategy', return_value=MirrorTestStrategy(self))
-        @patch('pulp_node.importers.http.importer.Downloader', LocalFileDownloader)
-        def test_handler(*unused):
-            # publish
-            self.populate(constants.ADDITIVE_STRATEGY)
-            pulp_conf.set('server', 'storage_dir', self.parentfs)
-            dist = NodesHttpDistributor()
-            repo = Repository(self.REPO_ID)
-            conduit = RepoPublishConduit(self.REPO_ID, constants.HTTP_DISTRIBUTOR)
-            dist.publish_repo(repo, conduit, self.dist_conf())
-            options = {
-                constants.PARENT_SETTINGS: self.PARENT_SETTINGS,
-                constants.STRATEGY_KEYWORD: constants.ADDITIVE_STRATEGY,
-            }
-            units = [{'type_id':'repository', 'unit_key':dict(repo_id=self.REPO_ID)}]
-            pulp_conf.set('server', 'storage_dir', self.childfs)
-            container = Container(self.parentfs)
-            dispatcher = Dispatcher(container)
-            container.handlers[CONTENT]['node'] = NodeHandler(self)
-            container.handlers[CONTENT]['repository'] = RepositoryHandler(self)
-            agent_conduit = AgentConduit(self.PULP_ID)
-            report = dispatcher.update(agent_conduit, units, options)
-            _report.append(report)
-        test_handler()
-        # Verify
-        report = _report[0].details['repository']
-        self.assertTrue(report['succeeded'])
-        errors = report['details']['errors']
-        repositories = report['details']['repositories']
-        self.assertEqual(len(errors), 0)
-        self.assertEqual(len(repositories), 1)
-        repository = repositories[0]
-        self.assertEqual(repository['repo_id'], self.REPO_ID)
-        self.assertEqual(repository['action'], RepositoryReport.ADDED)
-        units = repository['units']
-        self.assertEqual(units['added'], self.NUM_UNITS)
-        self.assertEqual(units['updated'], 0)
-        self.assertEqual(units['removed'], 0)
-        self.verify()

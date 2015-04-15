@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Contains reusable, expandable commands for the lifecycle and listing of
 repositories.
@@ -28,11 +15,12 @@ from gettext import gettext as _
 
 from pulp.bindings.exceptions import NotFoundException
 from pulp.client import arg_utils
-from pulp.client.commands.options import OPTION_NAME, OPTION_DESCRIPTION, OPTION_NOTES, OPTION_REPO_ID
+from pulp.client.commands.options import (OPTION_NAME, OPTION_DESCRIPTION, OPTION_NOTES,
+                                          OPTION_REPO_ID)
 from pulp.client.commands.polling import PollingCommand
 from pulp.client.extensions.extensions import PulpCliCommand, PulpCliFlag, PulpCliOption
+from pulp.common import tags
 
-# -- constants ----------------------------------------------------------------
 
 # Command Descriptions
 DESC_CREATE = _('creates a new repository')
@@ -40,12 +28,12 @@ DESC_UPDATE = _('changes metadata on an existing repository')
 DESC_DELETE = _('deletes a repository')
 DESC_LIST = _('lists repositories on the Pulp server')
 
-# -- commands -----------------------------------------------------------------
 
 class CreateRepositoryCommand(PulpCliCommand):
     """
     Creates a new repository in Pulp without any importers/distributors assigned.
     """
+    default_notes = {}
 
     def __init__(self, context, name='create', description=DESC_CREATE, method=None):
         self.context = context
@@ -61,19 +49,88 @@ class CreateRepositoryCommand(PulpCliCommand):
         self.add_option(OPTION_DESCRIPTION)
         self.add_option(OPTION_NOTES)
 
-    def run(self, **kwargs):
+    def _parse_basic_options(self, kwargs):
+        """
+        Parse the options known by this class
+
+        :param kwargs:  user input as provided by okaara
+        :type  kwargs:  dict
+
+        :return:    tuple of repo_id, name, description, notes
+        :rtype:     tuple
+        """
+
         # Collect input
         repo_id = kwargs[OPTION_REPO_ID.keyword]
         name = repo_id
         if OPTION_NAME.keyword in kwargs:
             name = kwargs[OPTION_NAME.keyword]
         description = kwargs[OPTION_DESCRIPTION.keyword]
-        notes = arg_utils.args_to_notes_dict(kwargs[OPTION_NOTES.keyword], include_none=True)
+        if kwargs[OPTION_NOTES.keyword]:
+            notes = arg_utils.args_to_notes_dict(kwargs[OPTION_NOTES.keyword], include_none=True)
+        else:
+            notes = {}
+        notes.update(self.default_notes)
 
+        return repo_id, name, description, notes
+
+    def run(self, **kwargs):
+        repo_id, name, description, notes = self._parse_basic_options(kwargs)
         # Call the server
         self.context.server.repo.create(repo_id, name, description, notes)
+        self.display_success(repo_id)
+
+    def display_success(self, repo_id):
+        """
+        Display a success message
+
+        :param repo_id: unique ID of the repository
+        :type  repo_id: basestring
+        """
         msg = _('Repository [%(r)s] successfully created')
-        self.prompt.render_success_message(msg % {'r' : repo_id})
+        self.prompt.render_success_message(msg % {'r': repo_id})
+
+
+class CreateAndConfigureRepositoryCommand(CreateRepositoryCommand):
+    IMPORTER_TYPE_ID = None
+
+    def _parse_importer_config(self, user_input):
+        """
+        Subclasses should override this to provide whatever option parsing
+        is needed to create an importer config.
+
+        :param user_input:  dictionary of data passed in by okaara
+        :type  user_input:  dict
+
+        :return:    importer config
+        :rtype:     dict
+        """
+        return {}
+
+    def _describe_distributors(self, user_input):
+        """
+        Subclasses should override this to provide whatever option parsing
+        is needed to create distributor configs.
+
+        :param user_input:  dictionary of data passed in by okaara
+        :type  user_input:  dict
+
+        :return:    list of tuples containing distributor_type_id,
+                    repo_plugin_config, auto_publish, and distributor_id (the same
+                    that would be passed to the RepoDistributorAPI.create call).
+        :rtype:     list
+        """
+        return []
+
+    def run(self, **kwargs):
+        repo_id, name, description, notes = self._parse_basic_options(kwargs)
+        # Call the server
+        importer_config = self._parse_importer_config(kwargs)
+        distributors = self._describe_distributors(kwargs)
+        self.context.server.repo.create_and_configure(repo_id, name, description, notes,
+                                                      self.IMPORTER_TYPE_ID, importer_config,
+                                                      distributors)
+        self.display_success(repo_id)
 
 
 class DeleteRepositoryCommand(PollingCommand):
@@ -96,21 +153,22 @@ class DeleteRepositoryCommand(PollingCommand):
         self.repo_id = kwargs[OPTION_REPO_ID.keyword]
 
         try:
-            task_list = self.context.server.repo.delete(self.repo_id).response_body
-            delete_task = task_list[0]  # ignore the unbind tasks for the purposes of this command
+            delete_task = self.context.server.repo.delete(self.repo_id).response_body
+            # TODO need a way to not monitor all the spawned unbined tasks built into polling
+            # An option on the poller to not recursively add spawned tasks would do it.
             self.poll([delete_task], kwargs)
 
         except NotFoundException:
             msg = _('Repository [%(r)s] does not exist on the server')
-            self.prompt.write(msg % {'r' : self.repo_id}, tag='not-found')
+            self.prompt.write(msg % {'r': self.repo_id}, tag='not-found')
 
     def succeeded(self, task):
         msg = _('Repository [%(r)s] successfully deleted')
-        msg = msg % {'r' : self.repo_id}
+        msg = msg % {'r': self.repo_id}
         self.prompt.render_success_message(msg)
 
 
-class UpdateRepositoryCommand(PulpCliCommand):
+class UpdateRepositoryCommand(PollingCommand):
     """
     Updates the metadata about just a repository, not its importers/distributors.
     """
@@ -122,7 +180,7 @@ class UpdateRepositoryCommand(PulpCliCommand):
         if method is None:
             method = self.run
 
-        super(UpdateRepositoryCommand, self).__init__(name, description, method)
+        super(UpdateRepositoryCommand, self).__init__(name, description, method, context)
 
         self.add_option(OPTION_REPO_ID)
         self.add_option(OPTION_NAME)
@@ -132,7 +190,11 @@ class UpdateRepositoryCommand(PulpCliCommand):
     def run(self, **kwargs):
         # Assemble the delta for all options that were passed in
         delta = dict([(k, v) for k, v in kwargs.items() if v is not None])
-        delta.pop(OPTION_REPO_ID.keyword) # not needed in the delta
+        repo_id = delta.pop(OPTION_REPO_ID.keyword)  # not needed in the delta
+
+        repo_config = {}
+        importer_config = None
+        distributor_configs = None
 
         # Translate the argument to key name
         if delta.pop(OPTION_NAME.keyword, None) is not None:
@@ -141,13 +203,43 @@ class UpdateRepositoryCommand(PulpCliCommand):
         if delta.pop(OPTION_NOTES.keyword, None) is not None:
             delta['notes'] = kwargs[OPTION_NOTES.keyword]
 
+        if delta.pop('distributor_configs', None) is not None:
+            distributor_configs = kwargs['distributor_configs']
+
+        if delta.pop('importer_config', None) is not None:
+            importer_config = kwargs['importer_config']
+
+        repo_config['delta'] = delta
+
         try:
-            self.context.server.repo.update(kwargs[OPTION_REPO_ID.keyword], delta)
-            msg = _('Repository [%(r)s] successfully updated')
-            self.prompt.render_success_message(msg % {'r' : kwargs[OPTION_REPO_ID.keyword]})
+            result = self.context.server.repo.update(repo_id, delta,
+                                                     importer_config, distributor_configs)
+            if result.is_async():
+                self.poll([result.response_body], kwargs)
+            else:
+                msg = _('Repository [%(r)s] successfully updated')
+                self.prompt.render_success_message(msg % {'r': repo_id})
         except NotFoundException:
             msg = _('Repository [%(r)s] does not exist on the server')
-            self.prompt.write(msg % {'r' : kwargs[OPTION_REPO_ID.keyword]}, tag='not-found')
+            self.prompt.write(msg % {'r': repo_id}, tag='not-found')
+
+    def task_header(self, task):
+        """
+        Uses task tags to determine what kind of task is happening, and if the
+        type is recognized, reports relevant info to the user.
+
+        :param task:    the task object being reported
+        :type  task:    pulp.bindings.responses.Task
+        """
+        if tags.action_tag(tags.ACTION_UPDATE_DISTRIBUTOR) in task.tags:
+            msg = _('Updating distributor')
+            # try to figure out which distributor is being updated
+            for tag in task.tags:
+                dist_tag = tags.resource_tag(tags.RESOURCE_REPOSITORY_DISTRIBUTOR_TYPE, '')
+                if tag.startswith(dist_tag):
+                    msg += ': %s' % tag[len(dist_tag):]
+                    break
+            self.prompt.write(msg, tag=tags.ACTION_UPDATE_DISTRIBUTOR)
 
 
 class ListRepositoriesCommand(PulpCliCommand):
@@ -208,12 +300,18 @@ class ListRepositoriesCommand(PulpCliCommand):
         d = _('if specified, detailed configuration information is displayed for each repository')
         self.add_option(PulpCliFlag('--details', d))
 
-        d = _('comma-separated list of repository fields; if specified, only the given fields will displayed')
+        d = _('comma-separated list of repository fields; '
+              'Example: "id,description,display_name,content_unit_counts". '
+              'If specified, only the given fields will be displayed.')
         self.add_option(PulpCliOption('--fields', d, required=False))
+
+        d = _('if specified, configuration information is displayed for one repository')
+        self.add_option(PulpCliOption('--repo-id', d, required=False))
 
         self.supports_all = include_all_flag
         if self.supports_all:
-            d = _('if specified, information on all Pulp repositories, regardless of type, will be displayed')
+            d = _('if specified, information on all Pulp repositories, '
+                  'regardless of type, will be displayed')
             self.add_option(PulpCliFlag('--all', d, aliases=['-a']))
 
     def run(self, **kwargs):
@@ -223,13 +321,19 @@ class ListRepositoriesCommand(PulpCliCommand):
 
         if kwargs['summary'] and kwargs['details']:
             msg = _('The summary and details views cannot be used together')
-            self.prompt.render_error_message(msg)
+            self.prompt.render_failure_message(msg)
             return
 
-        if kwargs['summary']:
+        if kwargs['summary'] and kwargs.get('repo-id'):
+            self.display_repository_summary(**kwargs)
+
+        elif kwargs['summary']:
             self.display_repository_summaries(**kwargs)
             if kwargs.get('all', False):
                 self.display_other_repository_summaries(**kwargs)
+
+        elif kwargs.get('repo-id'):
+            self.display_repositories(**kwargs)
 
         else:
             self.display_repositories(**kwargs)
@@ -238,7 +342,7 @@ class ListRepositoriesCommand(PulpCliCommand):
 
     def display_repositories(self, **kwargs):
         """
-        Default formatting for displaying the repositories returned from the
+        Default formatting for displaying the repositories/repository returned from the
         get_repositories method. This call may be overridden to customize
         the repository list appearance.
         """
@@ -259,9 +363,12 @@ class ListRepositoriesCommand(PulpCliCommand):
             if 'id' not in filters:
                 filters.append('id')
             order = ['id']
-
-        repo_list = self.get_repositories(query_params, **kwargs)
-        self.prompt.render_document_list(repo_list, filters=filters, order=order)
+        if kwargs.get('repo-id') is not None:
+            repo = self.get_repository(kwargs['repo-id'], query_params, **kwargs)
+            self.prompt.render_document(repo, filters=filters, order=order)
+        else:
+            repo_list = self.get_repositories(query_params, **kwargs)
+            self.prompt.render_document_list(repo_list, filters=filters, order=order)
 
     def display_other_repositories(self, **kwargs):
         """
@@ -285,6 +392,15 @@ class ListRepositoriesCommand(PulpCliCommand):
         """
         repo_list = self.get_repositories({}, **kwargs)
         _default_summary_view(repo_list, self.prompt)
+
+    def display_repository_summary(self, **kwargs):
+        """
+        Default formatting for displaying the summary view of repository returned
+        from the get_repository method. This call may be overridden to customize
+        the repository list appearance.
+        """
+        repo = self.get_repository(kwargs['repo-id'], {}, **kwargs)
+        _default_summary_view(repo, self.prompt)
 
     def display_other_repository_summaries(self, **kwargs):
         """
@@ -311,19 +427,37 @@ class ListRepositoriesCommand(PulpCliCommand):
         want to pass these directly to the bindings which will format them
         appropriately for the server-side call to apply them.
 
-        @param query_params: see above
-        @type  query_params: dict
-        @param kwargs: all keyword args passed from the CLI framework into this
-               command, including any that were added by a subclass
-        @type  kwargs: dict
+        :param query_params: see above
+        :type  query_params: dict
+        :param kwargs:       all keyword args passed from the CLI framework into this
+                             command, including any that were added by a subclass
+        :type  kwargs:       dict
 
-        @return: list of repositories to display as the first-class repositories
-                 in this list command; the format should be the same as what is
-                 returned from the server
-        @rtype: list
+        :return:             list of repositories to display as the first-class repositories
+                             in this list command; the format should be the same as what is
+                             returned from the server
+        :rtype:              list
         """
         repo_list = self.context.server.repo.repositories(query_params).response_body
         return repo_list
+
+    def get_repository(self, repo_id, query_params, **kwargs):
+        """
+        Same as get_repositories() but for one specific repo.
+
+        :param query_params: a dict of tweaks to what data should be included in the repository.
+        :type  query_params: dict
+        :param kwargs:       all keyword args passed from the CLI framework into this
+                             command, including any that were added by a subclass
+        :type  kwargs:       dict
+
+        :return:             information of specified repository will be displayed;
+                             the format should be the same as what is returned from the server
+        :rtype:              dict
+        """
+
+        repo = self.context.server.repo.repository(repo_id, query_params).response_body
+        return repo
 
     def get_other_repositories(self, query_params, **kwargs):
         """
@@ -353,17 +487,17 @@ class ListRepositoriesCommand(PulpCliCommand):
         want to pass these directly to the bindings which will format them
         appropriately for the server-side call to apply them.
 
-        @param query_params: see above
-        @type  query_params: dict
-        @param kwargs: all keyword args passed from the CLI framework into this
-               command, including any that were added by a subclass
-        @type  kwargs: dict
+        :param query_params: see above
+        :type  query_params: dict
+        :param kwargs:       all keyword args passed from the CLI framework into this
+                             command, including any that were added by a subclass
+        :type kwargs:        dict
 
-        @return: list of repositories to display as non-matching repositories
-                 in this list command; the format should be the same as what is
-                 returned from the server, the display method will take care
-                 of choosing which data to display to the user.
-        @rtype: list
+        :return:             list of repositories to display as non-matching repositories
+                             in this list command; the format should be the same as what is
+                             returned from the server, the display method will take care
+                             of choosing which data to display to the user.
+        :rtype:              list
         """
         return []
 
@@ -373,8 +507,8 @@ def _default_summary_view(repo_list, prompt):
     Default rendering for printing the summary view of a list of
     repositories.
 
-    :param repo_list: retrieved from either get_repositories or get_other_repositories
-    :type  repo_list: list
+    :param repo_list: retrieved from either get_repositories/y or get_other_repositories
+    :type  repo_list: list/dict
     """
 
     # The model being followed for this view is `yum repolist`. That command
@@ -383,14 +517,20 @@ def _default_summary_view(repo_list, prompt):
     # here).
 
     terminal_width = prompt.terminal_size()[0]
-
-    max_id_width = max(len(r['id']) for r in repo_list)
-    max_name_width = terminal_width - max_id_width - 1 # -1 for space between columns
-
     line_template = '%s  %s'
 
-    for repo in repo_list:
-        id_value = repo['id'] + ' ' * (max_id_width - len(repo['id']))
-        name_value = repo['display_name'][0:max_name_width]
+    if isinstance(repo_list, dict) and repo_list != {}:
+        id_value = repo_list['id'] + ' '
+        name_value = repo_list['display_name']
         line = line_template % (id_value, name_value)
         prompt.write(line, skip_wrap=True)
+
+    if isinstance(repo_list, list) and repo_list != []:
+        max_id_width = max(len(r['id']) for r in repo_list)
+        max_name_width = terminal_width - max_id_width - 1  # -1 for space between columns
+
+        for repo in repo_list:
+            id_value = repo['id'] + ' ' * (max_id_width - len(repo['id']))
+            name_value = repo['display_name'][0:max_name_width]
+            line = line_template % (id_value, name_value)
+            prompt.write(line, skip_wrap=True)

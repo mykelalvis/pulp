@@ -1,17 +1,5 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-from xml.etree import ElementTree
+import os
+import mock
 
 
 def compare_dict(source, target):
@@ -34,53 +22,69 @@ def compare_dict(source, target):
     target_keys = set(target.keys())
 
     if source_keys != target_keys:
-        raise AssertionError("Dictionaries do not match.  Keys are different")
+        source_keys_str = ', '.join(map(str, source_keys.difference(target_keys)))
+        target_keys_str = ', '.join(map(str, target_keys.difference(source_keys)))
+
+        msg = "Dictionaries do not match. "
+        if source_keys_str:
+            msg += "The following keys are in the source but not the target: [%s]. " % \
+                source_keys_str
+        if target_keys_str:
+            msg += "The following keys are in the target but not the source: [%s]. " % \
+                target_keys_str
+        raise AssertionError(msg)
 
     for key in source_keys:
         if source[key] != target[key]:
-            raise AssertionError("Dictionaries do not match.  Value mismatch for key %s" % key)
+            raise AssertionError("Dictionaries do not match.  Value mismatch for key %(key)s.  "
+                                 "%(value1)s is not equal to %(value2)s" %
+                                 {'key': key, 'value1': source[key], 'value2': target[key]})
 
 
-def compare_element(source, target):
+def assert_body_matches_async_task(body, task):
+    assert body['spawned_tasks'][0]['task_id'] == task.id
+
+
+def touch(path):
     """
-    Utility method to recursively compare two etree elements
+    Create a file at the specified path.  If the path does not exist already,
+    create the parent directories for the file specified
 
-    :param source: The source element to compare against the target
-    :type source: xml.etree.ElementTree.Element
-    :param target: The target element to compare against the source
-    :type target: xml.etree.ElementTree.Element
-    :raise AssertionError: if the elements do not match
+    :param path: The canonical file path to create
+    :type path: str
     """
-    if not ElementTree.iselement(source):
-        raise AssertionError("Source is not an element")
-    if not ElementTree.iselement(target):
-        raise AssertionError("Target is not an element")
+    parent = os.path.dirname(path)
 
-    if source.tag != target.tag:
-        raise AssertionError("elements do not match.  Tags are different %s != %s" %
-                             (source.tag, target.tag))
+    if not os.path.exists(parent):
+        os.makedirs(parent)
 
-    #test keys
-    source_keys = set(source.keys())
-    target_keys = set(target.keys())
+    file_handle = open(path, 'w')
+    file_handle.close()
 
-    if source_keys != target_keys:
-        raise AssertionError("elements do not match.  Keys are different")
 
-    for key in source_keys:
-        if source.get(key) != target.get(key):
-            raise AssertionError("Key values do not match.  Value mismatch for key %s: %s != %s" %
-                                 (key, source.get(key), target.get(key)))
+class SideEffect(object):
+    """
+    Side effect for older version of mock.
+    """
 
-    if source.text != target.text:
-        raise AssertionError("elements do not match.  Text is different\n%s\n%s" % (source.text,
-                                                                                    target.text))
+    def __init__(self, *values):
+        """
+        Side effect values.
 
-    #Use the deprecated getchildren method for python 2.6 support
-    source_children = list(source.getchildren())
-    target_children = list(target.getchildren())
-    if len(source_children) != len(target_children):
-        raise AssertionError("elements do not match.  Unequal number of child elements")
+        Example:
+          mock = Mock(side_effect=SideEffect(ValueError, None)
 
-    for source_child, target_child in zip(source_children, target_children):
-        compare_element(source_child, target_child)
+        :param values: List of values
+        :type values: list
+        """
+        self.values = iter(values)
+
+    def __call__(self, *args, **kwargs):
+        value = self.values.next()
+        if isinstance(value, mock.Mock):
+            return value
+        if callable(value):
+            value = value(*args, **kwargs)
+        if isinstance(value, Exception):
+            raise value
+        return value

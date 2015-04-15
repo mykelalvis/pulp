@@ -12,15 +12,18 @@
 import os
 import sys
 
-from mock import patch
+from mock import patch, Mock, call
 
 from base import ClientTests, Response, Task
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + "/../../child")
 
 from pulp.agent.lib.report import ContentReport
-from pulp_node import constants
+from pulp.common.constants import PRIMARY_ID
+from pulp.server.content.sources.model import DownloadReport, DownloadDetails
+
 from pulp_node.extensions.admin.commands import *
+from pulp_node.extensions.admin.rendering import ProgressTracker
 from pulp_node.error import *
 from pulp_node.reports import RepositoryReport
 from pulp_node.handlers.reports import SummaryReport
@@ -169,7 +172,6 @@ class TestListCommands(ClientTests):
 class TestPublishCommand(ClientTests):
 
     @patch(REPO_ENABLED_CHECK, return_value=True)
-    @patch('pulp.client.commands.polling.PollingCommand.postponed')
     @patch('pulp.client.commands.polling.PollingCommand.rejected')
     @patch('pulp.client.commands.polling.PollingCommand.poll')
     @patch(PUBLISH_API, return_value=Response(200, {}))
@@ -184,7 +186,6 @@ class TestPublishCommand(ClientTests):
 
 
     @patch(REPO_ENABLED_CHECK, return_value=False)
-    @patch('pulp.client.commands.polling.PollingCommand.postponed')
     @patch('pulp.client.commands.polling.PollingCommand.rejected')
     @patch('pulp.client.commands.polling.PollingCommand.poll')
     @patch(PUBLISH_API, return_value=Response(200, {}))
@@ -435,10 +436,14 @@ class TestRenderers(ClientTests):
         summary_report.setup([{'repo_id': r} for r in repo_ids])
         for r in summary_report.repository.values():
             r.action = RepositoryReport.ADDED
+            download_report = DownloadReport()
+            download_report.downloads[PRIMARY_ID] = DownloadDetails()
+            download_report.downloads['content-world'] = DownloadDetails()
+            r.sources = download_report.dict()
         handler_report.set_succeeded(details=summary_report.dict())
         renderer = UpdateRenderer(self.context.prompt, handler_report.dict())
         renderer.render()
-        self.assertEqual(len(self.recorder.lines), 32)
+        self.assertEqual(len(self.recorder.lines), 59)
 
     def test_update_rendering_with_errors(self):
         repo_ids = ['repo_%d' % n for n in range(0, 3)]
@@ -447,8 +452,153 @@ class TestRenderers(ClientTests):
         summary_report.setup([{'repo_id': r} for r in repo_ids])
         for r in summary_report.repository.values():
             r.action = RepositoryReport.ADDED
-        summary_report.errors.append(UnitDownloadError('http://abc/x.rpm', repo_ids[0], dict(response_code=401)))
+        summary_report.errors.append(
+            UnitDownloadError('http://abc/x.rpm', repo_ids[0], dict(response_code=401)))
         handler_report.set_failed(details=summary_report.dict())
         renderer = UpdateRenderer(self.context.prompt, handler_report.dict())
         renderer.render()
-        self.assertEqual(len(self.recorder.lines), 42)
+        self.assertEqual(len(self.recorder.lines), 48)
+
+    def test_update_rendering_with_message(self):
+        handler_report = ContentReport()
+        handler_report.set_failed(details=dict(message='Authorization Failed'))
+        renderer = UpdateRenderer(self.context.prompt, handler_report.dict())
+        renderer.render()
+        self.assertEqual(len(self.recorder.lines), 4)
+
+
+class TestProgressTracking(ClientTests):
+
+    def test_display_none(self):
+        fake_prompt = Mock()
+        tracker = ProgressTracker(fake_prompt)
+        tracker.display(None)
+
+    def test_display_no_report(self):
+        fake_prompt = Mock()
+        tracker = ProgressTracker(fake_prompt)
+        tracker.display({})
+
+    def test_display_no_snapshot(self):
+        reports = [
+            {'repo_id': 1, 'state': 'merging'},
+            {'repo_id': 2, 'state': 'merging'},
+            {'repo_id': 3, 'state': 'merging'},
+        ]
+        report = {
+            'progress': reports
+        }
+        mock_prompt = Mock()
+        snapshot = [(r, Mock()) for r in reports]
+        mock_prompt.create_progress_bar.side_effect = [s[1] for s in snapshot]
+        tracker = ProgressTracker(mock_prompt)
+        tracker._render = Mock()
+        tracker.display(report)
+        self.assertEqual(tracker.snapshot, snapshot)
+        tracker._render.assert_has_calls([call(r, pb) for r, pb in snapshot])
+        mock_prompt.write.assert_has_calls(
+            [
+                call('\n'),
+                call('(1/3) Repository: 1'),
+                call('\n'),
+                call('(2/3) Repository: 2'),
+                call('\n'),
+                call('(3/3) Repository: 3')
+            ]
+        )
+
+    def test_display_with_snapshot(self):
+        reports = [
+            {'repo_id': 1, 'state': 'import_finished'},
+            {'repo_id': 2, 'state': 'import_finished'},
+            {'repo_id': 3, 'state': 'import_finished'},
+            {'repo_id': 4, 'state': 'import_finished'},
+            {'repo_id': 5, 'state': 'import_finished'},
+            {'repo_id': 6, 'state': 'merging'},
+        ]
+        report = {
+            'progress': reports
+        }
+        mock_prompt = Mock()
+        snapshot = [(r, Mock()) for r in reports]
+        mock_prompt.create_progress_bar.side_effect = [s[1] for s in snapshot[3:]]
+        tracker = ProgressTracker(mock_prompt)
+        tracker.snapshot = snapshot[:3]
+        tracker._render = Mock()
+        tracker.display(report)
+        self.assertEqual(tracker.snapshot, snapshot)
+        tracker._render.assert_has_calls([call(r, pb) for r, pb in snapshot[3:]])
+        mock_prompt.write.assert_has_calls(
+            [
+                call('\n'),
+                call('(4/6) Repository: 4'),
+                call('\n'),
+                call('(5/6) Repository: 5'),
+                call('\n'),
+                call('(6/6) Repository: 6')
+            ]
+        )
+
+    def test_find(self):
+        reports = [
+            {'repo_id': 1, 'state': 'merging'},
+            {'repo_id': 2, 'state': 'merging'},
+            {'repo_id': 3, 'state': 'merging'},
+        ]
+        self.assertEqual(ProgressTracker._find(2, reports), reports[1])
+
+    def test_render(self):
+        report = {
+            'repo_id': 1,
+            'state': 'adding_units',
+            'unit_add': {
+                'total': 10,
+                'completed': 5,
+                'details': 'http://redhat.com/foo/bar.unit'
+            }
+        }
+        progress_bar = Mock()
+        ProgressTracker._render(report, progress_bar)
+        progress_bar.render.assert_called_with(5, 10, 'Step: Adding Units\n(5/10) Add unit: bar.unit')
+
+    def test_render_not_adding_units(self):
+        report = {
+            'repo_id': 1,
+            'state': 'merging',
+            'unit_add': {
+                'total': 10,
+                'completed': 5,
+                'details': ''
+            }
+        }
+        progress_bar = Mock()
+        ProgressTracker._render(report, progress_bar)
+        progress_bar.render.assert_called_with(5, 10, None)
+
+    def test_render_zero_total_and_finished(self):
+        report = {
+            'repo_id': 1,
+            'state': 'import_finished',
+            'unit_add': {
+                'total': 0,
+                'completed': 0,
+                'details': ''
+            }
+        }
+        progress_bar = Mock()
+        ProgressTracker._render(report, progress_bar)
+        progress_bar.render.assert_called_with(1, 1)
+
+    def test_render_zero_total_and_not_finished(self):
+        report = {
+            'repo_id': 1,
+            'state': 'merging',
+            'unit_add': {
+                'total': 0,
+                'completed': 0,
+                'details': ''
+            }
+        }
+        progress_bar = Mock()
+        ProgressTracker._render(report, progress_bar)
+        progress_bar.render.assert_called_with(0.01, 1)

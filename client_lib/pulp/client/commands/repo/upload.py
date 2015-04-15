@@ -1,26 +1,13 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 from gettext import gettext as _
 import os
 
 from okaara.prompt import COLOR_GREEN, COLOR_YELLOW
 
 from pulp.bindings.exceptions import ConflictException
-from pulp.client.commands import options
+from pulp.client.commands import options, polling
 from pulp.client.extensions.extensions import PulpCliCommand, PulpCliFlag, PulpCliOption
+from pulp.client.upload.manager import UploadManager
 
-# -- constants ----------------------------------------------------------------
 
 COLOR_RUNNING = COLOR_GREEN
 COLOR_PAUSED = COLOR_YELLOW
@@ -33,14 +20,15 @@ DESC_CANCEL = _('cancels an outstanding upload request')
 
 # Options
 DESC_FORCE = _('removes the client-side tracking file for the upload regardless of '
-    'whether or not it was able to be deleted on the server; this should '
-    'only be used in the event that the server\'s knowledge of an upload '
-    'has been removed')
+               'whether or not it was able to be deleted on the server; this should '
+               'only be used in the event that the server\'s knowledge of an upload '
+               'has been removed')
 FLAG_FORCE = PulpCliFlag('--force', DESC_FORCE)
 
 DESC_FILE = _('full path to a file to upload; may be specified multiple times '
               'for multiple files')
-OPTION_FILE = PulpCliOption('--file', DESC_FILE, aliases=['-f'], allow_multiple=True, required=False)
+OPTION_FILE = PulpCliOption('--file', DESC_FILE, aliases=['-f'], allow_multiple=True,
+                            required=False)
 
 DESC_DIR = _('full path to a directory containing files to upload; '
              'may be specified multiple times for multiple directories')
@@ -49,7 +37,6 @@ OPTION_DIR = PulpCliOption('--dir', DESC_DIR, aliases=['-d'], allow_multiple=Tru
 DESC_VERBOSE = _('display extra information about the upload process')
 FLAG_VERBOSE = PulpCliFlag('-v', DESC_VERBOSE)
 
-# -- exceptions ---------------------------------------------------------------
 
 class MetadataException(Exception):
     """
@@ -68,11 +55,96 @@ class MetadataException(Exception):
     def __str__(self):
         return self.message
 
-# -- commands -----------------------------------------------------------------
 
-class UploadCommand(PulpCliCommand):
+class PerformUploadCommand(polling.PollingCommand):
+    """
+    UploadCommand and ResumeCommand both need the same perform_upload() method, but they have
+    incompatible initialization so it doesn't make sense for ResumeCommand to subclass
+    UploadCommand. They both subclass this class so they can get the perform_upload() method.
+    """
 
-    def __init__(self, context, upload_manager, name='upload',
+    def perform_upload(self, context, upload_manager, upload_ids, user_input):
+        """
+        Uploads (resumes if necessary) uploading the given upload requests. The
+        context is used to retrieve the bindings and this call will use the prompt
+        to display output to the screen.
+
+        :param context:        framework provided context
+        :type  context:        PulpCliContext
+        :param upload_manager: initialized upload manager instance
+        :type  upload_manager: UploadManager
+        :param upload_ids:     list of upload IDs to handle
+        :type  upload_ids:     list
+        :param user_input:     keyword arguments that were passed this this command
+        :type  user_input:     dict
+        """
+
+        d = _('Starting upload of selected units. If this process is stopped through '
+              'ctrl+c, the uploads will be paused and may be resumed later using the '
+              'resume command or cancelled entirely using the cancel command.')
+        context.prompt.render_paragraph(d)
+
+        # Upload and import each upload. The try block is inside of the loop to
+        # allow uploads to continue even if one hits an exception. The exception
+        # handler is called directly to use the standard logging/display for
+        # exceptions but otherwise the next upload is allowed. The only variation
+        # is that a KeyboardInterrupt represents pausing the upload process.
+        for upload_id in upload_ids:
+            try:
+                tracker = upload_manager.get_upload(upload_id)
+                if tracker.source_filename:
+                    # Upload the bits
+                    context.prompt.write(
+                        _('Uploading: %(n)s') % {'n': os.path.basename(tracker.source_filename)})
+                    bar = context.prompt.create_progress_bar()
+
+                    def progress_callback(item, total):
+                        msg = _('%(i)s/%(t)s bytes')
+                        bar.render(item, total, msg % {'i': item, 't': total})
+
+                    upload_manager.upload(upload_id, progress_callback)
+
+                    context.prompt.write(_('... completed'))
+                    context.prompt.render_spacer()
+
+                # Import the upload request
+                context.prompt.write(_('Importing into the repository...'))
+
+                # If the import fails due to a conflict, this call will bubble up
+                # the appropriate exception to the middleware. It's best to let
+                # this bubble up as there's no reason to process any more uploads
+                # in the list; if one conflicted and this call is scoped to a
+                # particular repo, there's no reason to bother with the others as
+                # they will fail too.
+                try:
+                    response = upload_manager.import_upload(upload_id)
+                except ConflictException:
+                    upload_manager.delete_upload(upload_id, force=True)
+                    raise
+
+                self.poll([response.response_body], user_input)
+
+                # Delete the request
+                context.prompt.write(_('Deleting the upload request...'))
+                upload_manager.delete_upload(upload_id)
+                context.prompt.write(_('... completed'))
+                context.prompt.render_spacer()
+
+            except KeyboardInterrupt:
+                d = _('Uploading paused')
+                context.prompt.render_paragraph(d)
+                return
+
+            except Exception, e:
+                context.exception_handler.handle_exception(e)
+
+
+class UploadCommand(PerformUploadCommand):
+    """
+    This is the PulpCLICommand that handles unit uploads to the Pulp server.
+    """
+
+    def __init__(self, context, upload_manager=None, name='upload',
                  description=DESC_UPLOAD, method=None, upload_files=True):
         """
         Extendable command for handling the process of uploading a file to
@@ -88,11 +160,13 @@ class UploadCommand(PulpCliCommand):
                to upload and the create will be purely metadata based
         :type  upload_files: bool
         """
+        if upload_manager is None:
+            upload_manager = UploadManager.init_with_defaults(context)
 
         if method is None:
             method = self.run
 
-        super(UploadCommand, self).__init__(name, description, method)
+        super(UploadCommand, self).__init__(name, description, method, context)
 
         self.context = context
         self.prompt = context.prompt
@@ -107,13 +181,20 @@ class UploadCommand(PulpCliCommand):
 
         self.add_flag(FLAG_VERBOSE)
 
-    def run(self, **kwargs):
+    def run(self, **user_input):
+        """
+        This is the main method that gets called when an upload is requested.
+
+        :param user_input: The user provided settings
+        :type  user_input: dict
+        """
         self.prompt.render_title(_('Unit Upload'))
 
-        repo_id = kwargs[options.OPTION_REPO_ID.keyword]
-        specified_files = kwargs.get(OPTION_FILE.keyword) or []
-        specified_dirs = kwargs.get(OPTION_DIR.keyword) or []
-        verbose = kwargs.get(FLAG_VERBOSE.keyword) or False
+        repo_id = user_input[options.OPTION_REPO_ID.keyword]
+        specified_files = user_input.get(OPTION_FILE.keyword) or []
+        specified_dirs = user_input.get(OPTION_DIR.keyword) or []
+        verbose = user_input.get(FLAG_VERBOSE.keyword) or False
+        override_config = self.generate_override_config(**user_input)
 
         self._verify_repo_exists(repo_id)
 
@@ -123,7 +204,8 @@ class UploadCommand(PulpCliCommand):
         for d in specified_dirs:
             # Sanity check
             if not os.path.isdir(d):
-                self.context.prompt.render_failure_message(_('Directory %(d)s does not exist') % {'d' : d})
+                self.context.prompt.render_failure_message(
+                    _('Directory %(d)s does not exist') % {'d': d})
                 return os.EX_IOERR
 
             # Load the files in the directory
@@ -138,7 +220,8 @@ class UploadCommand(PulpCliCommand):
         # Integrity check on the total list of files
         for f in all_filenames:
             if not os.path.isfile(f) or not os.access(f, os.R_OK):
-                self.context.prompt.render_failure_message(_('File %(f)s does not exist or could not be read') % {'f' : f})
+                self.context.prompt.render_failure_message(
+                    _('File %(f)s does not exist or could not be read') % {'f': f})
                 return os.EX_IOERR
 
         # Package into FileBundle DTOs
@@ -153,26 +236,28 @@ class UploadCommand(PulpCliCommand):
         if self.upload_files:
             for i, file_bundle in enumerate(orig_file_bundles):
                 filename = file_bundle.filename
-                bar.render(i + 1, len(orig_file_bundles), message=_('Analyzing: %(n)s') % {'n' : os.path.basename(filename)})
+                bar.render(i + 1, len(orig_file_bundles),
+                           message=_('Analyzing: %(n)s') % {'n': os.path.basename(filename)})
 
                 try:
-                    unit_key, unit_metadata = self.generate_unit_key_and_metadata(filename, **kwargs)
+                    unit_key, unit_metadata = self.generate_unit_key_and_metadata(filename,
+                                                                                  **user_input)
                 except MetadataException, e:
                     msg = _('Metadata for %(name)s could not be generated. The '
                             'specific error is as follows:')
-                    msg = msg % {'name' : filename}
+                    msg = msg % {'name': filename}
                     self.prompt.render_spacer()
                     self.prompt.render_failure_message(msg)
                     self.prompt.render_failure_message(e.message)
                     return os.EX_DATAERR
 
-                type_id = self.determine_type_id(filename, **kwargs)
+                type_id = self.determine_type_id(filename, **user_input)
                 file_bundle.type_id = type_id
                 file_bundle.unit_key.update(unit_key)
                 file_bundle.metadata.update(unit_metadata)
         else:
             try:
-                unit_key, unit_metadata = self.generate_unit_key_and_metadata(None, **kwargs)
+                unit_key, unit_metadata = self.generate_unit_key_and_metadata(None, **user_input)
             except MetadataException, e:
                 msg = _('Metadata for the unit to create could not be generated. '
                         'The specific error is as follows:')
@@ -181,7 +266,7 @@ class UploadCommand(PulpCliCommand):
                 self.prompt.render_failure_message(e.message)
                 return os.EX_DATAERR
 
-            type_id = self.determine_type_id(None, **kwargs)
+            type_id = self.determine_type_id(None, **user_input)
             file_bundle = FileBundle(None, type_id, unit_key, unit_metadata)
             orig_file_bundles.append(file_bundle)
 
@@ -189,7 +274,7 @@ class UploadCommand(PulpCliCommand):
         self.prompt.render_spacer()
 
         # Give the subclass a chance to remove any files that shouldn't be uploaded
-        file_bundles = self.create_upload_list(orig_file_bundles, **kwargs)
+        file_bundles = self.create_upload_list(orig_file_bundles, **user_input)
 
         # Display the list of files to upload
         if verbose and self.upload_files:
@@ -224,20 +309,21 @@ class UploadCommand(PulpCliCommand):
             filename = file_bundle.filename
 
             if self.upload_files:
-                msg = _('Initializing: %(n)s') % {'n' : os.path.basename(filename)}
+                msg = _('Initializing: %(n)s') % {'n': os.path.basename(filename)}
             else:
                 msg = _('Initializing upload')
 
             bar.render(i + 1, len(file_bundles), message=msg)
-            upload_id = self.upload_manager.initialize_upload(filename, repo_id, file_bundle.type_id,
-                                                              file_bundle.unit_key, file_bundle.metadata)
+            upload_id = self.upload_manager.initialize_upload(
+                filename, repo_id, file_bundle.type_id, file_bundle.unit_key, file_bundle.metadata,
+                override_config)
             upload_ids.append(upload_id)
 
         self.prompt.write(_('... completed'))
         self.prompt.render_spacer()
 
         # Start the upload process
-        perform_upload(self.context, self.upload_manager, upload_ids)
+        self.perform_upload(self.context, self.upload_manager, upload_ids, user_input)
 
     def matching_files_in_dir(self, directory):
         """
@@ -339,6 +425,17 @@ class UploadCommand(PulpCliCommand):
         """
         return {}
 
+    def generate_override_config(self, **kwargs):
+        """
+        Subclasses may override this to introduce an override config value to the upload
+        command. If not overridden, an empty override config will be specified.
+
+        :param kwargs: parsed from the user input
+
+        :return: value to pass the upload call as its override_config parameter
+        """
+        return {}
+
     def create_upload_list(self, file_bundles, **kwargs):
         """
         Called after the metadata has been extracted for each file specified by the
@@ -370,24 +467,47 @@ class UploadCommand(PulpCliCommand):
         self.context.server.repo.repository(repo_id)
 
 
-class ResumeCommand(PulpCliCommand):
+class ResumeCommand(PerformUploadCommand):
     """
     Displays a list of paused uploads and allows one or more of them to be
     resumed.
     """
 
-    def __init__(self, context, upload_manager, name='resume', description=DESC_RESUME, method=None):
+    def __init__(self, context, upload_manager, name='resume', description=DESC_RESUME,
+                 method=None):
+        """
+        Initialize the ResumeCommand.
+
+        :param context:        Pulp client context
+        :type  context:        pulp.client.extensions.core.ClientContext
+        :param upload_manager: created and configured upload manager instance
+        :type  upload_manager: pulp.client.upload.manager.UploadManager
+        :param name:           The name of the command (optional, defaults to 'resume')
+        :type  name:           basestring
+        :param description:    The description of the command (optional,
+                               defaults to pulp.client.commands.repo.upload.DESC_RESUME)
+        :type  description:    basestring
+        :param method:         The method the command should run when invoked (optional, defaults to
+                               pulp.client.commands.repo.upload.ResumeCommand.run)
+        :type  method:         callable
+        """
 
         if method is None:
             method = self.run
 
-        PulpCliCommand.__init__(self, name, description, method)
+        super(ResumeCommand, self).__init__(name, description, method, context)
 
         self.context = context
         self.prompt = context.prompt
         self.upload_manager = upload_manager
 
-    def run(self):
+    def run(self, **user_input):
+        """
+        This performs the work to resume the upload.
+
+        :param user_input: The user specified flags
+        :type  user_input: dict
+        """
         self.context.prompt.render_title(_('Upload Requests'))
 
         # Determine which (if any) uploads are eligible to resume
@@ -407,7 +527,8 @@ class ResumeCommand(PulpCliCommand):
         # Prompt the user to select one or more uploads to resume
         source_filenames = [os.path.basename(u.source_filename) for u in non_running_uploads]
         q = _('Select one or more uploads to resume: ')
-        selected_indexes = self.context.prompt.prompt_multiselect_menu(q, source_filenames, interruptable=True)
+        selected_indexes = self.context.prompt.prompt_multiselect_menu(q, source_filenames,
+                                                                       interruptable=True)
 
         # User either selected no items or elected to abort (or ctrl+c)
         if selected_indexes is self.context.prompt.ABORT or len(selected_indexes) == 0:
@@ -418,9 +539,10 @@ class ResumeCommand(PulpCliCommand):
         selected_filenames = [os.path.basename(u.source_filename) for u in selected_uploads]
         selected_ids = [u.upload_id for u in selected_uploads]
 
-        self.context.prompt.render_paragraph(_('Resuming upload for: %(u)s') % {'u' : ', '.join(selected_filenames)})
+        self.context.prompt.render_paragraph(
+            _('Resuming upload for: %(u)s') % {'u': ', '.join(selected_filenames)})
 
-        perform_upload(self.context, self.upload_manager, selected_ids)
+        self.perform_upload(self.context, self.upload_manager, selected_ids, user_input)
 
 
 class ListCommand(PulpCliCommand):
@@ -459,7 +581,14 @@ class ListCommand(PulpCliCommand):
                 state = '[%s]' % self.context.prompt.color(_(' Paused  '), COLOR_PAUSED)
 
             template = '%s %s'
-            message = template % (state, os.path.basename(upload.source_filename))
+
+            # Fix for BZ 1100892 - rpm repo uploads list fails
+            if upload.source_filename:
+                source_name = os.path.basename(upload.source_filename)
+            else:
+                source_name = _('Metadata Upload')
+
+            message = template % (state, source_name)
             self.context.prompt.write(message)
 
         self.context.prompt.render_spacer()
@@ -471,7 +600,8 @@ class CancelCommand(PulpCliCommand):
     to cancel.
     """
 
-    def __init__(self, context, upload_manager, name='cancel', description=DESC_CANCEL, method=None):
+    def __init__(self, context, upload_manager, name='cancel', description=DESC_CANCEL,
+                 method=None):
 
         if method is None:
             method = self.run
@@ -508,7 +638,8 @@ class CancelCommand(PulpCliCommand):
         # Prompt for which upload requests to cancel
         source_filenames = [os.path.basename(u.source_filename) for u in non_running_uploads]
         q = _('Select one or more uploads to cancel: ')
-        selected_indexes = self.context.prompt.prompt_multiselect_menu(q, source_filenames, interruptable=True)
+        selected_indexes = self.context.prompt.prompt_multiselect_menu(q, source_filenames,
+                                                                       interruptable=True)
 
         # If the user selected none or aborted (or ctrl+c), punch out
         if selected_indexes is self.context.prompt.ABORT or len(selected_indexes) == 0:
@@ -525,9 +656,11 @@ class CancelCommand(PulpCliCommand):
         for i, upload_id in enumerate(selected_ids):
             try:
                 self.upload_manager.delete_upload(upload_id, force=force)
-                self.context.prompt.render_success_message(_('Successfully deleted %(f)s') % {'f' : selected_filenames[i]})
+                self.context.prompt.render_success_message(
+                    _('Successfully deleted %(f)s') % {'f': selected_filenames[i]})
             except Exception, e:
-                self.context.prompt.render_failure_message(_('Error deleting %(f)s') % {'f' : selected_filenames[i]})
+                self.context.prompt.render_failure_message(
+                    _('Error deleting %(f)s') % {'f': selected_filenames[i]})
                 self.context.exception_handler.handle_exception(e)
                 error_encountered = True
 
@@ -536,7 +669,6 @@ class CancelCommand(PulpCliCommand):
         else:
             return os.EX_OK
 
-# -- utility ------------------------------------------------------------------
 
 class FileBundle(object):
     """
@@ -555,93 +687,3 @@ class FileBundle(object):
 
     def __str__(self):
         return self.filename
-
-
-def perform_upload(context, upload_manager, upload_ids):
-    """
-    Uploads (resumes if necessary) uploading the given upload requests. The
-    context is used to retrieve the bindings and this call will use the prompt
-    to display output to the screen.
-
-    :param context: framework provided context
-    :type  context: PulpCliContext
-
-    :param upload_manager: initialized upload manager instance
-    :type  upload_manager: UploadManager
-
-    :param upload_ids: list of upload IDs to handle
-    :type  upload_ids: list
-    """
-
-    d = _('Starting upload of selected units. If this process is stopped through '
-         'ctrl+c, the uploads will be paused and may be resumed later using the '
-         'resume command or cancelled entirely using the cancel command.')
-    context.prompt.render_paragraph(d)
-
-    # Upload and import each upload. The try block is inside of the loop to
-    # allow uploads to continue even if one hits an exception. The exception
-    # handler is called directly to use the standard logging/display for
-    # exceptions but otherwise the next upload is allowed. The only variation
-    # is that a KeyboardInterrupt represents pausing the upload process.
-    for upload_id in upload_ids:
-        try:
-            tracker = upload_manager.get_upload(upload_id)
-            if tracker.source_filename:
-                # Upload the bits
-                context.prompt.write(_('Uploading: %(n)s') % {'n' : os.path.basename(tracker.source_filename)})
-                bar = context.prompt.create_progress_bar()
-
-                def progress_callback(item, total):
-                    msg = _('%(i)s/%(t)s bytes')
-                    bar.render(item, total, msg % {'i' : item, 't' : total})
-
-                upload_manager.upload(upload_id, progress_callback)
-
-                context.prompt.write(_('... completed'))
-                context.prompt.render_spacer()
-
-            # Import the upload request
-            context.prompt.write(_('Importing into the repository...'))
-
-            # If the import fails due to a conflict, this call will bubble up
-            # the appropriate exception to the middleware. It's best to let
-            # this bubble up as there's no reason to process any more uploads
-            # in the list; if one conflicted and this call is scoped to a
-            # particular repo, there's no reason to bother with the others as
-            # they will fail too.
-            try:
-                response = upload_manager.import_upload(upload_id)
-            except ConflictException:
-                upload_manager.delete_upload(upload_id, force=True)
-                raise
-
-            if response.is_async():
-                msg = _('Import postponed due to queued operations against the '
-                        'repository. The progress of this import can be viewed in the '
-                        'repository tasks list.')
-                context.prompt.render_warning_message(msg)
-
-                # Do not delete the upload here; we need it lying around for
-                # when the import is completed
-            else:
-                if response.response_body['success_flag']:
-                    context.prompt.write(_('... completed'), tag='import_upload_success')
-                    context.prompt.render_spacer()
-                else:
-                    msg = _('... failed: %(e)s')
-                    msg = msg % {'e': response.response_body['summary']}
-                    context.prompt.render_failure_message(msg)
-
-                # Delete the request
-                context.prompt.write(_('Deleting the upload request...'))
-                upload_manager.delete_upload(upload_id)
-                context.prompt.write(_('... completed'))
-                context.prompt.render_spacer()
-
-        except KeyboardInterrupt:
-            d = _('Uploading paused')
-            context.prompt.render_paragraph(d)
-            return
-
-        except Exception, e:
-            context.exception_handler.handle_exception(e)

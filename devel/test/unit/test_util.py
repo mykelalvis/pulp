@@ -11,7 +11,11 @@
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
 import unittest
-from xml.etree import ElementTree
+import os
+import shutil
+import tempfile
+
+from mock import Mock, MagicMock
 
 from pulp.devel.unit import util
 
@@ -58,65 +62,57 @@ class TestCompareDic(unittest.TestCase):
         self.assertRaises(AssertionError, util.compare_dict, source, target)
 
 
-class TestCompareEtree(unittest.TestCase):
+class TestAssertBodyMatchesAsyncTask(unittest.TestCase):
 
-    def test_compare_element_equality(self):
-        source_string = '<foo alpha="bar">some text <baz></baz></foo>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(source_string)
-        util.compare_element(source, target)
+    def test_successful_match(self):
+        body = {'spawned_tasks': [{'task_id': "foo"}, ]}
+        task = Mock()
+        task.id = "foo"
+        util.assert_body_matches_async_task(body, task)
 
-    def test_compare_element_inequality_tags(self):
-        source_string = '<foo></foo>'
-        target_string = '<bar></bar>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target)
+    def test_failure_malformed_body(self):
+        body = {}
+        task = Mock()
+        task.id = "foo"
+        self.assertRaises(Exception, util.assert_body_matches_async_task, body, task)
 
-    def test_compare_element_inequality_text(self):
-        source_string = '<foo>alpha</foo>'
-        target_string = '<foo>beta</foo>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target)
 
-    def test_compare_element_inequality_keys(self):
-        source_string = '<foo alpha="bar"></foo>'
-        target_string = '<foo beta="bar"></foo>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target)
+class TestTouch(unittest.TestCase):
 
-    def test_compare_element_inequality_values(self):
-        source_string = '<foo alpha="bar"></foo>'
-        target_string = '<foo alpha="foo"></foo>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target)
+    def setUp(self):
+        self.working_dir = tempfile.mkdtemp()
 
-    def test_compare_element_source_not_element(self):
-        source_string = '<foo alpha="bar"></foo>'
-        target_string = '<foo alpha="foo"></foo>'
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source_string, target)
+    def tearDown(self):
+        shutil.rmtree(self.working_dir, ignore_errors=True)
 
-    def test_compare_element_target_not_element(self):
-        source_string = '<foo alpha="bar"></foo>'
-        target_string = '<foo alpha="foo"></foo>'
-        source = ElementTree.fromstring(source_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target_string)
+    def test_in_existing_directory(self):
+        filename = os.path.join(self.working_dir, "foo.txt")
+        util.touch(filename)
 
-    def test_compare_element_child_different(self):
-        source_string = '<foo alpha="bar">some text <baz>qux</baz></foo>'
-        target_string = '<foo alpha="bar">some text <baz>zap</baz></foo>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target)
+        self.assertTrue(os.path.exists(filename))
 
-    def test_compare_element_child_different_number(self):
-        source_string = '<foo alpha="bar">some text <baz>qux</baz></foo>'
-        target_string = '<foo alpha="bar">some text <baz>zap</baz><fuz></fuz></foo>'
-        source = ElementTree.fromstring(source_string)
-        target = ElementTree.fromstring(target_string)
-        self.assertRaises(AssertionError, util.compare_element, source, target)
+    def test_create_parent_diectory(self):
+        filename = os.path.join(self.working_dir, 'subdir', "foo.txt")
+        util.touch(filename)
+        self.assertTrue(os.path.exists(filename))
+
+
+class TestSideEffect(unittest.TestCase):
+    def test_side_effect(self):
+        mock_object = Mock(foo='bar')
+        magic_mock = MagicMock(foo='qux')
+        side_effect = util.SideEffect(None, ValueError, Exception('foo'),
+                                      'apple', mock_object, magic_mock)
+        # test with an empty value
+        self.assertEquals(None, side_effect())
+        # Test with an exception that has not been instantiated
+        self.assertRaises(ValueError, side_effect)
+        # Test with an instantiated exception
+        self.assertRaises(Exception, side_effect)
+        # Test with a string value
+        self.assertEquals('apple', side_effect())
+        # Test mock and magic mock to ensure we don't call the mock object
+        # and use the return_value instead of the object itself.
+        self.assertEquals(side_effect().foo, 'bar')
+        self.assertEquals(side_effect().foo, 'qux')
 

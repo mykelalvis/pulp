@@ -13,12 +13,28 @@
 
 import logging
 
+from celery.result import AsyncResult
+from django.http import HttpResponse
+
+from pulp.server.async.tasks import TaskResult
 from pulp.server.compat import json, json_util, http_responses
-from pulp.server.exceptions import MultipleOperationsPostponed, OperationPostponed
+from pulp.server.exceptions import OperationPostponed
 from pulp.server.webservices import serialization
 
 
 _LOG = logging.getLogger(__name__)
+
+
+def _get_operation_postponed_body(exception):
+    report = exception.call_report
+    if isinstance(exception.call_report, AsyncResult):
+        report = TaskResult.from_async_result(exception.call_report)
+    serialized_call_report = report.serialize()
+    for task in serialized_call_report['spawned_tasks']:
+        href_obj = serialization.dispatch.task_result_href(task)
+        task.update(href_obj)
+
+    return json.dumps(serialized_call_report, default=json_util.default)
 
 
 class PostponedOperationMiddleware(object):
@@ -39,11 +55,7 @@ class PostponedOperationMiddleware(object):
             return self.app(environ, start_response)
 
         except OperationPostponed, e:
-            serialized_call_report = e.call_report.serialize()
-            href_obj = serialization.dispatch.task_href(e.call_report)
-            serialized_call_report.update(href_obj)
-
-            body = json.dumps(serialized_call_report, default=json_util.default)
+            body = _get_operation_postponed_body(e)
 
             self.headers['Content-Length'] = str(len(body))
             start_str = '%d %s' % (e.http_status_code, http_responses[e.http_status_code])
@@ -51,20 +63,13 @@ class PostponedOperationMiddleware(object):
             start_response(start_str, [(k, v) for k, v in self.headers.items()])
             return [body]
 
-        except MultipleOperationsPostponed, e:
-            serialized_call_report_list = []
 
-            for call_report in e.call_report_list:
-                href_obj = serialization.dispatch.task_group_href(call_report)
-                serialized_call_report = call_report.serialize()
-                serialized_call_report.update(href_obj)
-                serialized_call_report_list.append(serialized_call_report)
+class DjangoPostponedOperationMiddleware(object):
 
-            body = json.dumps(serialized_call_report_list, default=json_util.default)
-
-            self.headers['Content-Length'] = str(len(body))
-            start_str = '%d %s' % (e.http_status_code, http_responses[e.http_status_code])
-
-            start_response(start_str, [(k, v) for k, v in self.headers.items()])
-            return [body]
-
+    def process_exception(self, request, exception):
+        if isinstance(exception, OperationPostponed):
+            body = _get_operation_postponed_body(exception)
+            status = exception.http_status_code
+            response_obj = HttpResponse(body, status=status, content_type="application/json")
+            response_obj['Content-Encoding'] = 'utf-8'
+            return response_obj

@@ -1,8 +1,12 @@
 %{!?python_sitelib: %global python_sitelib %(%{__python} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib())")}
-%{!?ruby_sitelib: %global ruby_sitelib %(ruby -rrbconfig  -e 'puts Config::CONFIG["sitelibdir"]')}
+
+# Determine supported
+%if 0%{?rhel} >= 7 || 0%{?fedora} >= 18
+%define systemd 1
+%endif
 
 Name: gofer
-Version: 0.77.1
+Version: 2.6.1
 Release: 1%{?dist}
 Summary: A lightweight, extensible python agent
 Group:   Development/Languages
@@ -16,14 +20,19 @@ BuildRequires: python2-devel
 BuildRequires: python-setuptools
 BuildRequires: rpm-python
 Requires: python-%{name} = %{version}
-Requires: python-iniparse
+%if 0%{?systemd}
+BuildRequires: systemd
+Requires(post): systemd
+Requires(preun): systemd
+Requires(postun): systemd
+%endif
 %description
 Gofer provides an extensible, light weight, universal python agent.
 The gofer core agent is a python daemon (service) that provides
 infrastructure for exposing a remote API and for running Recurring
 Actions. The APIs contributed by plug-ins are accessible by Remote
-Method Invocation (RMI). The transport for RMI is AMQP using the
-QPID message broker. Actions are also provided by plug-ins and are
+Method Invocation (RMI). The transport for RMI is AMQP using an
+AMQP message broker. Actions are also provided by plug-ins and are
 executed at the specified interval.
 
 %prep
@@ -41,20 +50,6 @@ popd
 rm -rf %{buildroot}
 pushd src
 %{__python} setup.py install -O1 --skip-build --root %{buildroot}
-pushd ruby
-mkdir -p %{buildroot}/%{ruby_sitelib}/%{name}/rmi
-mkdir -p %{buildroot}/%{ruby_sitelib}/%{name}/messaging
-cp %{name}.rb %{buildroot}/%{ruby_sitelib}
-pushd %{name}
-cp *.rb %{buildroot}/%{ruby_sitelib}/%{name}
-pushd rmi
-cp *.rb %{buildroot}/%{ruby_sitelib}/%{name}/rmi
-popd
-pushd messaging
-cp *.rb %{buildroot}/%{ruby_sitelib}/%{name}/messaging
-popd
-popd
-popd
 popd
 
 mkdir -p %{buildroot}/usr/bin
@@ -62,18 +57,22 @@ mkdir -p %{buildroot}/%{_sysconfdir}/%{name}
 mkdir -p %{buildroot}/%{_sysconfdir}/%{name}/plugins
 mkdir -p %{buildroot}/%{_sysconfdir}/%{name}/conf.d
 mkdir -p %{buildroot}/%{_sysconfdir}/init.d
-mkdir -p %{buildroot}/%{_var}/log/%{name}
-mkdir -p %{buildroot}/%{_var}/lib/%{name}/journal/watchdog
+mkdir -p %{buildroot}/%{_unitdir}
 mkdir -p %{buildroot}/%{_usr}/lib/%{name}/plugins
 mkdir -p %{buildroot}/%{_usr}/share/%{name}/plugins
 mkdir -p %{buildroot}/%{_mandir}/man1
 
 cp bin/%{name}d %{buildroot}/usr/bin
-cp etc/init.d/%{name}d %{buildroot}/%{_sysconfdir}/init.d
 cp etc/%{name}/*.conf %{buildroot}/%{_sysconfdir}/%{name}
 cp etc/%{name}/plugins/*.conf %{buildroot}/%{_sysconfdir}/%{name}/plugins
 cp src/plugins/*.py %{buildroot}/%{_usr}/share/%{name}/plugins
 cp docs/man/man1/* %{buildroot}/%{_mandir}/man1
+
+%if 0%{?systemd}
+cp usr/lib/systemd/system/* %{buildroot}/%{_unitdir}
+%else
+cp etc/init.d/%{name}d %{buildroot}/%{_sysconfdir}/init.d
+%endif
 
 rm -rf %{buildroot}/%{python_sitelib}/%{name}*.egg-info
 
@@ -86,10 +85,13 @@ rm -rf %{buildroot}
 %dir %{_usr}/lib/%{name}/plugins/
 %dir %{_usr}/share/%{name}/plugins/
 %dir %{_sysconfdir}/%{name}/conf.d/
-%dir %{_var}/log/%{name}/
 %{python_sitelib}/%{name}/agent/
 %{_bindir}/%{name}d
+%if 0%{?systemd}
+%attr(644,root,root) %{_unitdir}/%{name}d.service
+%else
 %attr(755,root,root) %{_sysconfdir}/init.d/%{name}d
+%endif
 %config(noreplace) %{_sysconfdir}/%{name}/agent.conf
 %config(noreplace) %{_sysconfdir}/%{name}/plugins/builtin.conf
 %{_usr}/share/%{name}/plugins/builtin.*
@@ -97,70 +99,111 @@ rm -rf %{buildroot}
 %doc %{_mandir}/man1/gofer*
 
 %post
+%if 0%{?systemd}
+%systemd_post %{name}d.service
+%else
 chkconfig --add %{name}d
+%endif
 
 %preun
+%if 0%{?systemd}
+%systemd_preun %{name}d.service
+%else
 if [ $1 = 0 ] ; then
    /sbin/service %{name}d stop >/dev/null 2>&1
    /sbin/chkconfig --del %{name}d
 fi
+%endif
+
+%postun
+%if 0%{?systemd}
+%systemd_postun_with_restart %{name}d.service
+%endif
 
 
-###############################################################################
-# python lib
-###############################################################################
+# --- python lib -------------------------------------------------------------
 
 %package -n python-%{name}
 Summary: Gofer python lib modules
 Group: Development/Languages
-Obsoletes: %{name}-lib
 BuildRequires: python
-Requires: python-simplejson
-Requires: python-qpid >= 0.18
-Requires: PyPAM
+Requires: pam
 %if 0%{?rhel} && 0%{?rhel} < 6
+Requires: python-ctypes
+Requires: python-simplejson
 Requires: python-hashlib
 Requires: python-uuid
-Requires: python-ssl
 %endif
 
 %description -n python-%{name}
-Contains gofer python lib modules.
+Provides gofer python lib modules.
 
 %files -n python-%{name}
 %defattr(-,root,root,-)
 %{python_sitelib}/%{name}/*.py*
 %{python_sitelib}/%{name}/rmi/
-%{python_sitelib}/%{name}/messaging/
+%dir %{python_sitelib}/%{name}/messaging/
+%dir %{python_sitelib}/%{name}/messaging/adapter
+%{python_sitelib}/%{name}/messaging/*.py*
+%{python_sitelib}/%{name}/messaging/adapter/*.py*
+%{python_sitelib}/%{name}/devel/
 %doc LICENSE
 
-###############################################################################
-# ruby lib
-###############################################################################
 
-%package -n ruby-%{name}
-Summary: Gofer ruby lib modules
+# --- python-qpid messaging adapter ------------------------------------------
+
+%package -n python-%{name}-qpid
+Summary: Gofer Qpid messaging adapter python package
 Group: Development/Languages
-BuildRequires: ruby
-Requires: rubygems
-Requires: rubygem(json)
-Requires: rubygem(qpid) >= 0.16.0
+BuildRequires: python
+Requires: python-%{name} = %{version}
+Requires: python-qpid >= 0.18
+%if 0%{?rhel} && 0%{?rhel} < 6
+Requires: python-ssl
+%endif
 
-%description -n ruby-%{name}
-Contains gofer ruby lib modules.
+%description -n python-%{name}-qpid
+Provides the gofer qpid messaging adapter package.
 
-%files -n ruby-%{name}
-%defattr(-,root,root,-)
-%{ruby_sitelib}/%{name}.rb
-%{ruby_sitelib}/%{name}/*.rb
-%{ruby_sitelib}/%{name}/rmi/
-%{ruby_sitelib}/%{name}/messaging/
+%files -n python-%{name}-qpid
+%{python_sitelib}/%{name}/messaging/adapter/qpid
 %doc LICENSE
 
 
-###############################################################################
-# plugin: system
-###############################################################################
+# --- python-qpid-proton messaging adapter -----------------------------------
+
+%package -n python-%{name}-proton
+Summary: Gofer Qpid proton messaging adapter python package
+Group: Development/Languages
+BuildRequires: python
+Requires: python-%{name} = %{version}
+Requires: python-qpid-proton >= 0.9-1.20150219
+
+%description -n python-%{name}-proton
+Provides the gofer qpid proton messaging adapter package.
+
+%files -n python-%{name}-proton
+%{python_sitelib}/%{name}/messaging/adapter/proton
+%doc LICENSE
+
+
+# --- python-amqp messaging adapter ------------------------------------------
+
+%package -n python-%{name}-amqp
+Summary: Gofer amqp messaging adapter python package
+Group: Development/Languages
+BuildRequires: python
+Requires: python-%{name} = %{version}
+Requires: python-amqp >= 1.4.5
+
+%description -n python-%{name}-amqp
+Provides the gofer amqp messaging adapter package.
+
+%files -n python-%{name}-amqp
+%{python_sitelib}/%{name}/messaging/adapter/amqp
+%doc LICENSE
+
+# --- plugin: system ---------------------------------------------------------
 
 %package -n gofer-system
 Summary: The system plug-in
@@ -169,7 +212,7 @@ BuildRequires: python
 Requires: %{name} >= %{version}
 
 %description -n gofer-system
-Contains the system plug-in.
+Provides the system plug-in.
 The system plug-in provides system functionality.
 
 %files -n gofer-system
@@ -179,32 +222,7 @@ The system plug-in provides system functionality.
 %doc LICENSE
 
 
-###############################################################################
-# plugin: watchdog
-###############################################################################
-
-%package -n gofer-watchdog
-Summary: The watchdog plug-in
-Group: Development/Languages
-BuildRequires: python
-Requires: %{name} >= %{version}
-
-%description -n gofer-watchdog
-Contains the watchdog plug-in.
-This plug-in is used to support time out
-for asynchronous RMI calls.
-
-%files -n gofer-watchdog
-%defattr(-,root,root,-)
-%config(noreplace) %{_sysconfdir}/%{name}/plugins/watchdog.conf
-%{_usr}/share/%{name}/plugins/watchdog.*
-%{_var}/lib/%{name}/journal/watchdog
-%doc LICENSE
-
-
-###############################################################################
-# plugin: virt
-###############################################################################
+# --- plugin: virt -----------------------------------------------------------
 
 %package -n gofer-virt
 Summary: The virtualization plugin
@@ -214,7 +232,7 @@ Requires: libvirt-python
 Requires: %{name} >= %{version}
 
 %description -n gofer-virt
-Contains the virtualization plugin.
+Provides the virtualization plugin.
 This plug-in provides RMI access to libvirt functionality.
 
 %files -n gofer-virt
@@ -224,9 +242,7 @@ This plug-in provides RMI access to libvirt functionality.
 %doc LICENSE
 
 
-###############################################################################
-# plugin: package
-###############################################################################
+# --- plugin: package --------------------------------------------------------
 
 %package -n gofer-package
 Summary: The package (RPM) plugin
@@ -236,7 +252,7 @@ Requires: yum
 Requires: %{name} >= %{version}
 
 %description -n gofer-package
-Contains the package plugin.
+Provides the package plugin.
 This plug-in provides RMI access to package (RPM) management.
 
 %files -n gofer-package
@@ -246,10 +262,204 @@ This plug-in provides RMI access to package (RPM) management.
 %doc LICENSE
 
 
+# --- changelog --------------------------------------------------------------
+
 
 %changelog
-* Fri Nov 01 2013 Jeff Ortel <jortel@redhat.com> 0.77.1-1
-- 1023056 - use qpid builtin SSL transport. (jortel@redhat.com)
+* Wed Mar 11 2015 Jeff Ortel <jortel@redhat.com> 2.6.1-1
+- python 2.6 compat. (jortel@redhat.com)
+
+* Mon Mar 09 2015 Jeff Ortel <jortel@redhat.com> 2.6.0-1
+- Support one-time actions. (jortel@redhat.com)
+- Support authenticator in the plugin descriptor. (jortel@redhat.com)
+- Support plugin monitoring. (jortel@redhat.com)
+- Support dynamic plugin loading, reloading, unloading.
+- Support services in system plugin. (jortel@redhat.com)
+- Support forwarding/accepting. (jortel@redhat.com)
+- Support comprehensive broker connection clean up.
+- Requires: python-ssl only on RHEL 5. (jortel@redhat.com)
+- 1198797 - Fixed recursion in adapter reliability logic. (jortel@redhat.com)
+- Fix not-authenticated error message. (jortel@redhat.com)
+- Fix systemd unit permissions. (jortel@redhat.com)
+- Window deprecated (jortel@redhat.com)
+
+* Fri Feb 20 2015 Jeff Ortel <jortel@redhat.com> 2.5.3-1
+- Broker renamed: Connector. (jortel@redhat.com)
+- Plugin not-found logged and discarded. (jortel@redhat.com)
+
+* Fri Feb 20 2015 Jeff Ortel <jortel@redhat.com> 2.5.2-1
+- proton 0.9-1.20150219 compat; proton.reactors renamed: proton.reactor.
+  (jortel@redhat.com)
+- 1192563 - validate SSL file paths. (jortel@redhat.com)
+
+* Thu Feb 12 2015 Jeff Ortel <jortel@redhat.com> 2.5.1-1
+- Fix virtual hosts. (jortel@redhat.com)
+- Using LinkDetached in proton.reliable. (jortel@redhat.com)
+- Better recognition of when SSL is to be used. (jortel@redhat.com)
+- Sender supports durable option. (jortel@redhat.com)
+* Tue Feb 10 2015 Jeff Ortel <jortel@redhat.com> 2.5.0-1
+- AdapterNotFound raised when explicit adapter not found. (jortel@redhat.com)
+- NotFound raised amqp node not found. (jortel@redhat.com)
+- Add url to Queue/Exchange constructor. (jortel@redhat.com)
+- Renamed: route to: address. (jortel@redhat.com)
+- Support amqp 1.0; add proton messaging adapter. (jortel@redhat.com)
+- Support auto-delete queue expiration. (jortel@redhat.com)
+- python-gofer-qpid no longer requires python-qpid-qmf. (jortel@redhat.com)
+- Add 2.5 release notes. (jortel@redhat.com)
+* Fri Jan 09 2015 Jeff Ortel <jortel@redhat.com> 2.4.0-1
+- Better thread pool worker selection. (jortel@redhat.com)
+- Fix builtin.Admin.help(). (jortel@redhat.com)
+- Add description to InvalidDocument. (jortel@redhat.com)
+- Fix TTL. (jortel@redhat.com)
+- amqplib adapter removed; heartbeat enabled on qpid connection
+  (jortel@redhat.com)
+- support configurable broker model management. (jortel@redhat.com)
+
+* Tue Jan 06 2015 Jeff Ortel <jortel@redhat.com> 2.3.0-1
+- QPID adapter using QMF. (jortel@redhat.com)
+- amqp adapter using epoll. (jortel@redhat.com)
+- Support custom exchanges. (jortel@redhat.com)
+* Thu Dec 18 2014 Jeff Ortel <jortel@redhat.com> 2.1.0-1
+- Fix plugin loading from python path. (jortel@redhat.com)
+- Improved adapter model. (jortel@redhat.com)
+- Improved builtin plugin. (jortel@redhat.com)
+- Get rid of broadcast policy. (jortel@redhat.com)
+- Domains added. (jortel@redhat.com)
+- The messaging section no longer supported in agent.conf. (jortel@redhat.com)
+- Update pmon to retry on notification exception. (jortel@redhat.com)
+- Get rid of adapter descriptors. (jortel@redhat.com)
+- ModelError raised for all model operations. (jortel@redhat.com)
+- Plugin class properties. (jortel@redhat.com)
+- Improved test coverage.
+* Mon Nov 24 2014 Jeff Ortel <jortel@redhat.com> 2.0.0-1
+- The transport concept has been revised and renamed to messaging adapters.
+- The transport parameter and configuation deprecated.
+- The URL updated to specify the messaging adapter.
+- Messaging adapters have descriptors and are loaded much like plugins.
+- Better unit test coverage.
+- Performance improvements and bug fixes.
+
+* Thu Nov 20 2014 Jeff Ortel <jortel@redhat.com> 1.4.1-1
+- Remove ruby lib. (jortel@redhat.com)
+- Remove broken ruby dependency. (jortel@redhat.com)
+
+* Mon Nov 03 2014 Jeff Ortel <jortel@redhat.com> 1.4.0-1
+- Add reply timestamp. (jortel@redhat.com)
+- Fix synchronous policy using durable queue.
+  (jortel@redhat.com)
+- Add python-amqp transport. (jortel@redhat.com)
+
+* Fri Aug 15 2014 Jeff Ortel <jortel@redhat.com> 1.3.1-1
+- 1129828 - split stack traces into separate log records. (jortel@redhat.com)
+- Added python-ctypes dependency. (jortel@redhat.com)
+- PyPAM replaced with ctypes implementation. (jortel@redhat.com)
+- Refactor: add transport Loader; transports loaded and cached when Transport
+  is instantiated instead of package import. (jortel@redhat.com)
+- Support passing url=None in broker meta-class. (jortel@redhat.com)
+* Mon Jun 16 2014 Jeff Ortel <jortel@redhat.com> 1.3.0-1
+- Update man page to reference github. (jortel@redhat.com)
+- Replace --console option with --foreground and use in systemd unit.
+  (jortel@redhat.com)
+- systemd support. (jortel@redhat.com)
+
+* Mon Jun 09 2014 Jeff Ortel <jortel@redhat.com> 1.2.1-1
+- 1107244 - python 2.4 compat issues. (jortel@redhat.com)
+* Thu May 29 2014 Jeff Ortel <jortel@redhat.com> 1.2.0-1
+- Add authenticator param to ReplyConsumer constructor. (jortel@redhat.com)
+- python 2.4 compat. (jortel@redhat.com)
+
+* Wed May 28 2014 Jeff Ortel <jortel@redhat.com> 1.1.0-1
+- Pass original document during auth validation instead of destination uuid.
+  (jortel@redhat.com)
+- Better support for associating an authenticator with a consumer.
+  (jortel@redhat.com)
+
+* Tue May 20 2014 Jeff Ortel <jortel@redhat.com> 1.0.13-1
+- Fix setting logging levels in agent.conf. (jortel@redhat.com)
+- In the amqplib transport, message durable=True. (jortel@redhat.com)
+
+* Wed May 14 2014 Jeff Ortel <jortel@redhat.com> 1.0.12-1
+- 1097732 - broker configured during attach. (jortel@redhat.com)
+- Support loading plugins from the PYTHON path. (jortel@redhat.com)
+- Support custom plugin naming. (jortel@redhat.com)
+
+* Tue May 06 2014 Jeff Ortel <jortel@redhat.com> 1.0.10-1
+- Condition Requires: and import of simplejson. (jortel@redhat.com)
+* Fri May 02 2014 Jeff Ortel <jortel@redhat.com> 1.0.9-1
+- Fix url syntax for userid:password; get vhost from url path component.
+  (jortel@redhat.com)
+
+* Thu May 01 2014 Jeff Ortel <jortel@redhat.com> 1.0.8-1
+- Inject inbound_url to support reply when plugin is not found.
+  (jortel@redhat.com)
+- Pass and store transport by name (instead of object). (jortel@redhat.com)
+- Set transport package based on actual packaged. (jortel@redhat.com)
+- Declare agent (target) queue in RMI policy send. (jortel@redhat.com)
+- Create queues in the consumer instead of the reader. (jortel@redhat.com)
+
+* Tue Apr 22 2014 Jeff Ortel <jortel@redhat.com> 1.0.7-1
+- Support extends= in plugin descriptors.  Defines another plugin to extend.
+  (jortel@redhat.com)
+
+* Thu Apr 17 2014 Jeff Ortel <jortel@redhat.com> 1.0.6-1
+- Inject inbound transport name on request receipt and used to reply when
+  unable to route to a plugin. (jortel@redhat.com)
+- Trash plugin implements get_url() and get_transport(). (jortel@redhat.com)
+- Log when plugin not found and request is trashed. (jortel@redhat.com)
+- PathMonitor initialized to prevent initial notification. (jortel@redhat.com)
+- Add @initializer decorator and plugin support. (jortel@redhat.com)
+- Fix pending message leak when uuid not matched to a plugin.
+  (jortel@redhat.com)
+* Mon Mar 31 2014 Jeff Ortel <jortel@redhat.com> 1.0.5-1
+- Log to syslog instead of /var/log/gofer/. (jortel@redhat.com)
+- Support userid/password in the broker url. (jortel@redhat.com)
+- Remove librabbitmq transport. (jortel@redhat.com)
+- Add support for skipping SSL validation. (jortel@redhat.com)
+- Use qpid builtin SSL transport. (jortel@redhat.com)
+* Wed Mar 12 2014 Jeff Ortel <jortel@redhat.com> 1.0.4-1
+- Improved import between plugins. (jortel@redhat.com)
+
+* Tue Mar 11 2014 Jeff Ortel <jortel@redhat.com> 1.0.3-1
+- make queue non-exclusive by default. (jortel@redhat.com)
+
+* Mon Mar 10 2014 Jeff Ortel <jortel@redhat.com> 1.0.2-1
+- Log consumed messages. (jortel@redhat.com)
+
+* Mon Mar 10 2014 Jeff Ortel <jortel@redhat.com> 1.0.1-1
+- Improved agent logging. (jortel@redhat.com)
+
+* Mon Mar 10 2014 Jeff Ortel <jortel@redhat.com> 1.0.0-1
+- Detach before attach and make detach idempotent. (jortel@redhat.com)
+- Explicit manual plugin attach; get rid of plugin monitor thread.
+  (jortel@redhat.com)
+- Support virtual_host and host_validation configuration options.
+  (jortel@redhat.com)
+- Support userid and password configuration options. (jortel@redhat.com)
+- Change envelope/document and Envelope/Document. (jortel@redhat.com)
+- Support pluggable message authentication. (jortel@redhat.com)
+- Send 'accepted' status when RMI request is added to the pending queue.
+  (jortel@redhat.com)
+- Send 'rejected' status report when message validation failed.
+  (jortel@redhat.com)
+- Direct routing by uuid; no more blending of plugin APIs. (jortel@redhat.com)
+- Move Admin class from builtin plugin to internal. (jortel@redhat.com)
+- Improved pending queue. (jortel@redhat.com)
+- Improved thread pool. (jortel@redhat.com)
+- Purge unused filter in configuration. (jortel@redhat.com)
+- Discontinue support for configuration directives. (jortel@redhat.com)
+- Purge mocks in favor of python mock. (jortel@redhat.com)
+- Support multiple transports (amqplib, rabbmitmq, python-qpid).
+- Discontinue support for deprectated watchdog. (jortel@redhat.com)
+- Simplified RMI timeout.  No longer supporting timeout for RMI completion.
+  (jortel@redhat.com)
+* Tue Jan 14 2014 Jeff Ortel <jortel@redhat.com> 1.0.0-0.1
+- default asynchronous timeout to None. (jortel@redhat.com)
+  add 'send' as required by transports. (jortel@redhat.com)
+- watchdog removed; timeout flows revised. watchdog removed; add 'accepted'
+  status; add 'wait' option; redefine timeout option as single integer
+  pertaining to the accepted. (jortel@redhat.com)
+- Add 'match' criteria operator. (jortel@redhat.com)
+- Support plugable transports. (jortel@redhat.com)
 * Mon Sep 30 2013 Jeff Ortel <jortel@redhat.com> 0.77-1
 - Reduce logging do DEBUG on frequent messaging and RMI processing events.
   (jortel@redhat.com)

@@ -1,32 +1,23 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
+from types import NoneType
 import base64
 import locale
 import logging
+import os
 import urllib
-import oauth2 as oauth
+try:
+    import oauth2 as oauth
+except ImportError:
+    # python-oauth2 isn't available on RHEL 5.
+    oauth = None
 
-from types import NoneType
-from M2Crypto import SSL, httpslib
+from M2Crypto import httpslib, m2, SSL
 
 from pulp.bindings import exceptions
 from pulp.bindings.responses import Response, Task
 from pulp.common.compat import json
+from pulp.common.constants import DEFAULT_CA_PATH
 from pulp.common.util import ensure_utf_8, encode_unicode
 
-
-# -- server connection --------------------------------------------------------
 
 class PulpConnection(object):
     """
@@ -51,7 +42,9 @@ class PulpConnection(object):
                  oauth_secret=None,
                  oauth_user='admin',
                  cert_filename=None,
-                 server_wrapper=None):
+                 server_wrapper=None,
+                 verify_ssl=True,
+                 ca_path=DEFAULT_CA_PATH):
 
         self.host = host
         self.port = port
@@ -87,7 +80,9 @@ class PulpConnection(object):
         else:
             self.server_wrapper = HTTPSServerWrapper(self)
 
-    # -- public methods -------------------------------------------------------
+        # SSL validation settings
+        self.verify_ssl = verify_ssl
+        self.ca_path = ca_path
 
     def DELETE(self, path, body=None):
         return self._request('DELETE', path, body=body)
@@ -146,9 +141,11 @@ class PulpConnection(object):
         response_code, response_body = self.server_wrapper.request(method, url, body)
 
         if self.api_responses_logger:
-            self.api_responses_logger.info('%s request to %s with parameters %s' % (method, url, body))
+            self.api_responses_logger.info(
+                '%s request to %s with parameters %s' % (method, url, body))
             self.api_responses_logger.info("Response status : %s \n" % response_code)
-            self.api_responses_logger.info("Response body :\n %s\n" % json.dumps(response_body, indent=2))
+            self.api_responses_logger.info(
+                "Response body :\n %s\n" % json.dumps(response_body, indent=2))
 
         if response_code >= 300:
             self._handle_exceptions(response_code, response_body)
@@ -176,10 +173,10 @@ class PulpConnection(object):
 
     def _handle_exceptions(self, response_code, response_body):
 
-        code_class_mappings = {400 : exceptions.BadRequestException,
-                               401 : exceptions.PermissionsException,
-                               404 : exceptions.NotFoundException,
-                               409 : exceptions.ConflictException}
+        code_class_mappings = {400: exceptions.BadRequestException,
+                               401: exceptions.PermissionsException,
+                               404: exceptions.NotFoundException,
+                               409: exceptions.ConflictException}
 
         if response_code not in code_class_mappings:
 
@@ -234,8 +231,6 @@ class PulpConnection(object):
         return path
 
 
-# -- wrapper classes ----------------------------------------------------------
-
 class HTTPSServerWrapper(object):
     """
     Used by the PulpConnection class to make an invocation against the server.
@@ -252,30 +247,65 @@ class HTTPSServerWrapper(object):
         self.pulp_connection = pulp_connection
 
     def request(self, method, url, body):
+        """
+        Make the request against the Pulp server, returning a tuple of (status_code, respose_body).
+        This method creates a new connection each time since HTTPSConnection has problems
+        reusing a connection for multiple calls (as claimed by a prior comment in this module).
 
+        :param method: The HTTP method to be used for the request (GET, POST, etc.)
+        :type  method: str
+        :param url:    The Pulp URL to make the request against
+        :type  url:    str
+        :param body:   The body to pass with the request
+        :type  body:   str
+        :return:       A 2-tuple of the status_code and response_body. status_code is the HTTP
+                       status code (200, 404, etc.). If the server's response is valid json,
+                       it will be parsed and response_body will be a dictionary. If not, it will be
+                       returned as a string.
+        :rtype:        tuple
+        """
         headers = dict(self.pulp_connection.headers)  # copy so we don't affect the calling method
 
-        # Create a new connection each time since HTTPSConnection has problems
-        # reusing a connection for multiple calls (lame).
-        ssl_context = None
+        # Despite the confusing name, 'sslv23' configures m2crypto to use any available protocol in
+        # the underlying openssl implementation.
+        ssl_context = SSL.Context('sslv23')
+        # This restricts the protocols we are willing to do by configuring m2 not to do SSLv2.0 or
+        # SSLv3.0. EL 5 does not have support for TLS > v1.0, so we have to leave support for
+        # TLSv1.0 enabled.
+        ssl_context.set_options(m2.SSL_OP_NO_SSLv2 | m2.SSL_OP_NO_SSLv3)
+
+        if self.pulp_connection.verify_ssl:
+            ssl_context.set_verify(SSL.verify_peer, depth=100)
+            # We need to stat the ca_path to see if it exists (error if it doesn't), and if so
+            # whether it is a file or a directory. m2crypto has different directives depending on
+            # which type it is.
+            if os.path.isfile(self.pulp_connection.ca_path):
+                ssl_context.load_verify_locations(cafile=self.pulp_connection.ca_path)
+            elif os.path.isdir(self.pulp_connection.ca_path):
+                ssl_context.load_verify_locations(capath=self.pulp_connection.ca_path)
+            else:
+                # If it's not a file and it's not a directory, it's not a valid setting
+                raise exceptions.MissingCAPathException(self.pulp_connection.ca_path)
+        ssl_context.set_session_timeout(self.pulp_connection.timeout)
+
         if self.pulp_connection.username and self.pulp_connection.password:
             raw = ':'.join((self.pulp_connection.username, self.pulp_connection.password))
             encoded = base64.encodestring(raw)[:-1]
             headers['Authorization'] = 'Basic ' + encoded
         elif self.pulp_connection.cert_filename:
-            ssl_context = SSL.Context('sslv3')
-            ssl_context.set_session_timeout(self.pulp_connection.timeout)
             ssl_context.load_cert(self.pulp_connection.cert_filename)
 
-        # oauth configuration
-        if self.pulp_connection.oauth_key and self.pulp_connection.oauth_secret:
+        # oauth configuration. This block is only True if oauth is not None, so it won't run on RHEL
+        # 5.
+        if self.pulp_connection.oauth_key and self.pulp_connection.oauth_secret and oauth:
             oauth_consumer = oauth.Consumer(
                 self.pulp_connection.oauth_key,
                 self.pulp_connection.oauth_secret)
             oauth_request = oauth.Request.from_consumer_and_token(
                 oauth_consumer,
                 http_method=method,
-                http_url='https://%s:%d%s' % (self.pulp_connection.host, self.pulp_connection.port, url))
+                http_url='https://%s:%d%s' % (self.pulp_connection.host, self.pulp_connection.port,
+                                              url))
             oauth_request.sign_request(oauth.SignatureMethod_HMAC_SHA1(), oauth_consumer, None)
             oauth_header = oauth_request.to_header()
             # unicode header values causes m2crypto to do odd things.
@@ -284,22 +314,20 @@ class HTTPSServerWrapper(object):
             headers.update(oauth_header)
             headers['pulp-user'] = self.pulp_connection.oauth_user
 
-        # Can't pass in None, so need to decide between two signatures (also lame)
-        if ssl_context is not None:
-            connection = httpslib.HTTPSConnection(
-                self.pulp_connection.host, self.pulp_connection.port, ssl_context=ssl_context)
-        else:
-            connection = httpslib.HTTPSConnection(self.pulp_connection.host, self.pulp_connection.port)
-
-        # Request against the server
-        connection.request(method, url, body=body, headers=headers)
+        connection = httpslib.HTTPSConnection(
+            self.pulp_connection.host, self.pulp_connection.port, ssl_context=ssl_context)
 
         try:
+            # Request against the server
+            connection.request(method, url, body=body, headers=headers)
             response = connection.getresponse()
         except SSL.SSLError, err:
             # Translate stale login certificate to an auth exception
             if 'sslv3 alert certificate expired' == str(err):
-                raise exceptions.ClientSSLException(self.pulp_connection.cert_filename)
+                raise exceptions.ClientCertificateExpiredException(
+                    self.pulp_connection.cert_filename)
+            elif 'certificate verify failed' in str(err):
+                raise exceptions.CertificateVerificationException()
             else:
                 raise exceptions.ConnectionException(None, str(err), None)
 

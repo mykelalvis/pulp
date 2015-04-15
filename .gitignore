@@ -1,4 +1,5 @@
 *svn*
+*.ipynb
 *.pyc
 .project
 .pydevproject
@@ -13,10 +14,16 @@ dist
 .idea
 .coverage
 cover
-*/sphinx/*/_build
+docs/_build
 .DS_Store
 *,cover
 tags
 
 # Ninja IDE
 *.nja
+
+# Sublime
+.codeintel
+
+#Rope
+.ropeproject

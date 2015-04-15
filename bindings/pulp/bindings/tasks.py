@@ -1,19 +1,10 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-import pulp.common.tags as tag_util
+"""
+This module contains bindings to the Task APIs.
+"""
 from pulp.bindings.base import PulpAPI
 from pulp.bindings.responses import Task
+from pulp.bindings.search import SearchAPI
+import pulp.common.tags as tag_util
 
 
 class TasksAPI(PulpAPI):
@@ -56,14 +47,15 @@ class TasksAPI(PulpAPI):
         Retrieves all tasks in the system. If tags are specified, only tasks
         that contain all of the given tags are returned. All tasks will be
         represented by Task objects in a list in the response's response_body
-        attribute.
+        attribute. By default, completed tasks are excluded but they can be included by setting
+        include_completed to True.
 
-        @param tags: if specified, only tasks that contain all tags in the given
-                     list are returned; None to return all tasks
-        @type  tags: list
-
-        @return: response with a list of Task objects; empty list for no matching tasks
-        @rtype:  Response
+        :param tags:              if specified, only tasks that contain all tags in the given
+                                  list are returned; None to return all tasks
+        :type  tags:              list
+        :return:                  response with a list of Task objects; empty list for no matching
+                                  tasks
+        :rtype:                   Response
         """
         path = '/v2/tasks/'
         tags = [('tag', t) for t in tags]
@@ -71,7 +63,8 @@ class TasksAPI(PulpAPI):
         response = self.server.GET(path, queries=tags)
 
         tasks = []
-        for doc in response.response_body:
+        # sort based on id, which is chronological in mongo
+        for doc in sorted(response.response_body, key=lambda x: x['id']['$oid']):
             tasks.append(Task(doc))
 
         response.response_body = tasks
@@ -92,13 +85,12 @@ class TasksAPI(PulpAPI):
 
     def get_repo_sync_tasks(self, repo_id):
         """
-        Retrieves all sync tasks for the given repository.
+        Retrieves all incomplete sync tasks for the given repository.
 
-        @param repo_id: identifies the repo
-        @type  repo_id: str
-
-        @return: response with a list of Task objects; empty list for no matching tasks
-        @rtype:  Response
+        :param repo_id: identifies the repo
+        :type  repo_id: str
+        :return:        response with a list of Task objects; empty list for no matching tasks
+        :rtype:         Response
         """
         repo_tag = tag_util.resource_tag(tag_util.RESOURCE_REPOSITORY_TYPE, repo_id)
         sync_tag = tag_util.action_tag(tag_util.ACTION_SYNC_TYPE)
@@ -119,36 +111,20 @@ class TasksAPI(PulpAPI):
         return self.get_all_tasks(tags=[repo_tag, publish_tag])
 
 
-class TaskGroupsAPI(PulpAPI):
+class TaskSearchAPI(SearchAPI):
+    """
+    Search Tasks.
+    """
+    PATH = 'v2/tasks/search/'
 
-    def __int__(self, pulp_connection):
-        super(TaskGroupsAPI, self).__init__(pulp_connection)
-
-    def cancel_task_group(self, task_group_id):
+    def search(self, **kwargs):
         """
-        Cancel a given task group. The individual tasks must support cancellation
-        or must not have begun.
+        Call the superclass search, and intercept the results so that we can turn the items back
+        into Tasks.
 
-        @param task_group_id: ID of the task group to cancel
-        @type task_group_id: str
-        @return: response
-        @rtype: Response
+        :param kwargs: Arguments to pass to SearchAPI.search()
+        :type  kwargs: dict
         """
-        path = '/v2/task_groups/%s/' % task_group_id
-        response = self.server.DELETE(path)
-        return response
+        tasks = super(TaskSearchAPI, self).search(**kwargs)
 
-    def get_task_group(self, task_group_id):
-        """
-        Retrieves the status of all tasks in the task group.
-
-        @param task_group_id: ID of the task group to retrieve
-        @type task_group_id: str
-        @return: response with the status of all tasks in the task group in its body
-        @rtype: Response
-        """
-        path = 'v2/task_groups/%s/' % task_group_id
-        response = self.server.GET(path)
-        response.response_body = [Task(t) for t in response.response_body]
-        return response
-
+        return [Task(task) for task in tasks]

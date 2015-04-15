@@ -58,7 +58,7 @@ expires: 3d
 name: Content World
 type: yum
 base_url: http://content-world/content/
-url: f18/x86_64/os/ \
+paths: f18/x86_64/os/ \
      f18/i386/os/ \
      f19/x86_64/os \
      f19/i386/os
@@ -80,6 +80,12 @@ from pulp.server.content.sources import constants
 
 log = getLogger(__name__)
 
+DEFAULT = {
+    constants.PRIORITY: '0',
+    constants.EXPIRES: '24h',
+    constants.MAX_CONCURRENT: '2',
+    constants.SSL_VALIDATION: 'true'
+}
 
 SCHEMA = [
     None, REQUIRED,
@@ -159,8 +165,8 @@ def nectar_config(descriptor):
     :rtype: DownloaderConfig
     """
     options = {}
-    for key, fn in constants.NECTAR_PROPERTIES:
+    for key, option, fn in constants.NECTAR_PROPERTIES:
         value = descriptor.get(key)
         if value:
-            options[key] = fn(value)
+            options[option] = fn(value)
     return DownloaderConfig(**options)

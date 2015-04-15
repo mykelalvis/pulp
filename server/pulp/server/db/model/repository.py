@@ -1,23 +1,9 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-import datetime
 import traceback as traceback_module
 
-import pulp.common.dateutils as dateutils
 from pulp.server.db.model.base import Model
+from pulp.server.db.model.reaper_base import ReaperMixin
+import pulp.common.dateutils as dateutils
 
-# -- repository classes --------------------------------------------------------
 
 class Repo(Model):
     """
@@ -40,10 +26,10 @@ class Repo(Model):
                  actual content of the repo
     @type notes: dict
 
-    @ivar content_unit_count: number of units associated with this repo. This is
+    @ivar content_unit_counts: number of units associated with this repo. This is
                               different than the number of associations, since a
                               unit may be associated multiple times.
-    @type content_unit_count: int
+    @type content_unit_counts: int
 
     @ivar metadata: arbitrary data that describes the contents of the repo;
                     the values may change as the contents of the repo change,
@@ -61,8 +47,10 @@ class Repo(Model):
         self.display_name = display_name
         self.description = description
         self.notes = notes or {}
-        self.scratchpad = {} # default to dict in hopes the plugins will just add/remove from it
+        self.scratchpad = {}  # default to dict in hopes the plugins will just add/remove from it
         self.content_unit_counts = content_unit_counts or {}
+        self.last_unit_added = None
+        self.last_unit_removed = None
 
         # Timeline
         # TODO: figure out how to track repo modified states
@@ -103,8 +91,10 @@ class RepoImporter(Model):
     @type last_sync: str
     """
 
+    RESOURCE_TEMPLATE = 'pulp:importer:%s:%s'
+
     collection_name = 'repo_importers'
-    unique_indices = ( ('repo_id', 'id'), )
+    unique_indices = (('repo_id', 'id'),)
 
     def __init__(self, repo_id, id, importer_type_id, config):
         super(RepoImporter, self).__init__()
@@ -117,6 +107,20 @@ class RepoImporter(Model):
         self.scratchpad = None
         self.last_sync = None
         self.scheduled_syncs = []
+
+    @classmethod
+    def build_resource_tag(cls, repo_id, importer_id):
+        """
+        :param repo_id:     unique ID for a repository
+        :type  repo_id:     basestring
+        :param importer_id: unique ID for the importer
+        :type  importer_id: basestring
+
+        :return:    a globally unique identifier for the repo and importer that
+                    can be used in cross-type comparisons.
+        :rtype:     basestring
+        """
+        return cls.RESOURCE_TEMPLATE % (repo_id, importer_id)
 
 
 class RepoDistributor(Model):
@@ -134,7 +138,7 @@ class RepoDistributor(Model):
     @type id: str
 
     @ivar distributor_type_id: used to look up the distributor plugin when this
-                               importer is used
+                               distributor is used
     @type distributor_type_id: str
 
     @ivar config: distributor config passed to the plugin when it is invoked
@@ -153,9 +157,10 @@ class RepoDistributor(Model):
                         in ISO8601 format
     @type last_publish: str
     """
+    RESOURCE_TEMPLATE = 'pulp:distributor:%s:%s'
 
     collection_name = 'repo_distributors'
-    unique_indices = ( ('repo_id', 'id'), )
+    unique_indices = (('repo_id', 'id'),)
 
     def __init__(self, repo_id, id, distributor_type_id, config, auto_publish):
         super(RepoDistributor, self).__init__()
@@ -168,6 +173,20 @@ class RepoDistributor(Model):
         self.scratchpad = None
         self.last_publish = None
         self.scheduled_publishes = []
+
+    @classmethod
+    def build_resource_tag(cls, repo_id, distributor_id):
+        """
+        :param repo_id:         unique ID for a repository
+        :type  repo_id:         basestring
+        :param distributor_id:  unique ID for the importer
+        :type  distributor_id:  basestring
+
+        :return:    a globally unique identifier for the repo and distributor that
+                    can be used in cross-type comparisons.
+        :rtype:     basestring
+        """
+        return cls.RESOURCE_TEMPLATE % (repo_id, distributor_id)
 
 
 class RepoContentUnit(Model):
@@ -207,7 +226,7 @@ class RepoContentUnit(Model):
     @type created: str
 
     @ivar updated: iso8601 formatted timestamp indicating the last time the association was
-                   updated (effectively when it was attempted to be created again but already existed)
+                   updated (effectively when it was attempted to be created but already existed)
     @type updated: str
     """
 
@@ -215,11 +234,11 @@ class RepoContentUnit(Model):
 
     # Make sure you understand how the order of these affects mongo before
     # modifying the following index
-    unique_indices = ( ('repo_id', 'unit_type_id', 'unit_id', 'owner_type', 'owner_id'), )
-    search_indices = ( ('repo_id', 'unit_type_id', 'owner_type'),
-                       ('unit_type_id', 'created'), # default sort order on get_units query, do not remove
-                       'unit_id',
-                     )
+    unique_indices = (('repo_id', 'unit_type_id', 'unit_id', 'owner_type', 'owner_id'),)
+    search_indices = (('repo_id', 'unit_type_id', 'owner_type'),
+                      # default sort order on get_units query, do not remove
+                      ('unit_type_id', 'created'),
+                      'unit_id')
 
     OWNER_TYPE_IMPORTER = 'importer'
     OWNER_TYPE_USER = 'user'
@@ -237,14 +256,16 @@ class RepoContentUnit(Model):
         self.owner_id = owner_id
 
         # store time in UTC
-        created = dateutils.to_utc_datetime(datetime.datetime.utcnow())
-        self.created = dateutils.format_iso8601_datetime(created)
+        utc_timestamp = dateutils.now_utc_timestamp()
+        self.created = dateutils.format_iso8601_utc_timestamp(utc_timestamp)
         self.updated = self.created
 
 
-class RepoSyncResult(Model):
+class RepoSyncResult(Model, ReaperMixin):
     """
     Stores the results of a repo sync.
+
+    The documents in this collection may be reaped, so it inherits from ReaperMixin.
     """
 
     collection_name = 'repo_sync_results'
@@ -255,7 +276,8 @@ class RepoSyncResult(Model):
     RESULT_CANCELED = 'canceled'
 
     @classmethod
-    def error_result(cls, repo_id, importer_id, importer_type_id, started, completed, exception, traceback):
+    def error_result(cls, repo_id, importer_id, importer_type_id, started, completed, exception,
+                     traceback):
         """
         Creates a new history entry for a failed sync. The details of the error
         raised from the plugin are captured.
@@ -282,7 +304,8 @@ class RepoSyncResult(Model):
         @type  traceback: traceback
         """
 
-        r = RepoSyncResult(repo_id, importer_id, importer_type_id, started, completed, RepoSyncResult.RESULT_ERROR)
+        r = RepoSyncResult(repo_id, importer_id, importer_type_id, started, completed,
+                           RepoSyncResult.RESULT_ERROR)
         r.error_message = str(exception)
         r.exception = repr(exception)
         r.traceback = traceback_module.format_tb(traceback)
@@ -365,9 +388,11 @@ class RepoSyncResult(Model):
         self.details = None
 
 
-class RepoPublishResult(Model):
+class RepoPublishResult(Model, ReaperMixin):
     """
     Stores the results of a repo publish.
+
+    The documents in this collection may be reaped, so it inherits from ReaperMixin.
     """
 
     collection_name = 'repo_publish_results'
@@ -377,7 +402,8 @@ class RepoPublishResult(Model):
     RESULT_ERROR = 'error'
 
     @classmethod
-    def error_result(cls, repo_id, distributor_id, distributor_type_id, started, completed, exception, traceback):
+    def error_result(cls, repo_id, distributor_id, distributor_type_id, started, completed,
+                     exception, traceback):
         """
         Creates a new history entry for a failed publish. The details of the error
         raised from the plugin are captured.
@@ -449,7 +475,8 @@ class RepoPublishResult(Model):
         return r
 
     @classmethod
-    def failed_result(cls, repo_id, distributor_id, distributor_type_id, started, completed, summary, details):
+    def failed_result(cls, repo_id, distributor_id, distributor_type_id, started, completed,
+                      summary, details):
         """
         Creates a new history entry for a gracefully failed publish.
 

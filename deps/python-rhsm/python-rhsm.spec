@@ -6,7 +6,7 @@
 
 Name: python-rhsm
 Version: 1.8.0
-Release: 1.pulp%{?dist}
+Release: 2.pulp%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
 Group: Development/Libraries
@@ -65,6 +65,12 @@ rm -rf %{buildroot}
 %attr(640,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
+* Tue Aug 12 2014 Randy Barlow <rbarlow@redhat.com> 1.8.0-2.pulp
+- new package built with tito
+
+* Mon Aug 11 2014 Randy Barlow <rbarlow@redhat.com>
+- new package built with tito
+
 * Mon Dec 03 2012 Michael Hrivnak <mhrivnak@redhat.com> 1.8.0-1.pulp
 - updating to latest and greatest python-rhsm (mhrivnak@redhat.com)
 

@@ -1,36 +1,20 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 from gettext import gettext as _
 import logging
 import sys
 
-import pulp.plugins.conduits._common as common_utils
+from pymongo.errors import DuplicateKeyError
+
 from pulp.plugins.model import Unit, PublishReport
 from pulp.plugins.types import database as types_db
-import pulp.server.dispatch.factory as dispatch_factory
+from pulp.server.async.tasks import get_current_task_id
+from pulp.server.db.model.dispatch import TaskStatus
 from pulp.server.exceptions import MissingResource
+import pulp.plugins.conduits._common as common_utils
 import pulp.server.managers.factory as manager_factory
 
-# Unused in this class but imported here so plugins don't have to reach
-# into server packages directly
-from pulp.server.db.model.criteria import UnitAssociationCriteria, Criteria
 
-# -- constants ----------------------------------------------------------------
+_logger = logging.getLogger(__name__)
 
-_LOG = logging.getLogger(__name__)
-
-# -- exceptions ---------------------------------------------------------------
 
 class ImporterConduitException(Exception):
     """
@@ -52,7 +36,13 @@ class ProfilerConduitException(Exception):
     """
     pass
 
-# -- mixins -------------------------------------------------------------------
+
+class ContentSourcesConduitException(Exception):
+    """
+    General exception that wraps any exception coming out of the Pulp server.
+    """
+    pass
+
 
 class RepoScratchPadMixin(object):
 
@@ -73,7 +63,8 @@ class RepoScratchPadMixin(object):
             value = repo_manager.get_repo_scratchpad(self.repo_id)
             return value
         except Exception, e:
-            _LOG.exception(_('Error getting repository scratchpad for repo [%(r)s]') % {'r' : self.repo_id})
+            _logger.exception(
+                _('Error getting repository scratchpad for repo [%(r)s]') % {'r': self.repo_id})
             raise self.exception_class(e), None, sys.exc_info()[2]
 
     def set_repo_scratchpad(self, value):
@@ -92,7 +83,8 @@ class RepoScratchPadMixin(object):
             repo_manager = manager_factory.repo_manager()
             repo_manager.set_repo_scratchpad(self.repo_id, value)
         except Exception, e:
-            _LOG.exception(_('Error setting repository scratchpad for repo [%(r)s]') % {'r' : self.repo_id})
+            _logger.exception(
+                _('Error setting repository scratchpad for repo [%(r)s]') % {'r': self.repo_id})
             raise self.exception_class(e), None, sys.exc_info()[2]
 
     def update_repo_scratchpad(self, scratchpad):
@@ -106,7 +98,7 @@ class RepoScratchPadMixin(object):
             manager.update_repo_scratchpad(self.repo_id, scratchpad)
         except Exception, e:
             msg = _('Error updating repository scratchpad for repo [%(r)s]') % {'r': self.repo_id}
-            _LOG.exception(msg)
+            _logger.exception(msg)
             raise self.exception_class(e), None, sys.exc_info()[2]
 
 
@@ -132,7 +124,8 @@ class RepoScratchpadReadMixin(object):
             value = repo_manager.get_repo_scratchpad(repo_id)
             return value
         except Exception, e:
-            _LOG.exception(_('Error getting repository scratchpad for repo [%(r)s]') % {'r' : repo_id})
+            _logger.exception(
+                _('Error getting repository scratchpad for repo [%(r)s]') % {'r': repo_id})
             raise self.exception_class(e), None, sys.exc_info()[2]
 
 
@@ -215,8 +208,31 @@ class SearchUnitsMixin(object):
             return transfer_units
 
         except Exception, e:
-            _LOG.exception('Exception from server requesting all units of type [%s]' % type_id)
+            _logger.exception('Exception from server requesting all units of type [%s]' % type_id)
             raise self.exception_class(e), None, sys.exc_info()[2]
+
+    def find_unit_by_unit_key(self, type_id, unit_key):
+        """
+        Finds a unit based on its unit key. If more than one unit comes back,
+        an exception will be raised.
+
+        @param type_id: indicates the type of units being retrieved
+        @type  type_id: str
+        @param unit_key: the unit key for the unit
+        @type  unit_key: dict
+
+        @return: a single unit
+        @rtype:  L{Unit}
+        """
+        content_query_manager = manager_factory.content_query_manager()
+        try:
+            # this call returns a unit or raises MissingResource
+            existing_unit = content_query_manager.get_content_unit_by_keys_dict(type_id, unit_key)
+            type_def = types_db.type_definition(type_id)
+            plugin_unit = common_utils.to_plugin_unit(existing_unit, type_def)
+            return plugin_unit
+        except MissingResource:
+            return None
 
 
 class ImporterScratchPadMixin(object):
@@ -242,7 +258,7 @@ class ImporterScratchPadMixin(object):
             value = importer_manager.get_importer_scratchpad(self.repo_id)
             return value
         except Exception, e:
-            _LOG.exception(_('Error getting scratchpad for repo [%(r)s]') % {'r' : self.repo_id})
+            _logger.exception(_('Error getting scratchpad for repo [%(r)s]') % {'r': self.repo_id})
             raise ImporterConduitException(e), None, sys.exc_info()[2]
 
     def set_scratchpad(self, value):
@@ -262,7 +278,7 @@ class ImporterScratchPadMixin(object):
             importer_manager = manager_factory.repo_importer_manager()
             importer_manager.set_importer_scratchpad(self.repo_id, value)
         except Exception, e:
-            _LOG.exception(_('Error setting scratchpad for repo [%(r)s]') % {'r' : self.repo_id})
+            _logger.exception(_('Error setting scratchpad for repo [%(r)s]') % {'r': self.repo_id})
             raise ImporterConduitException(e), None, sys.exc_info()[2]
 
 
@@ -285,10 +301,11 @@ class DistributorScratchPadMixin(object):
         """
         try:
             distributor_manager = manager_factory.repo_distributor_manager()
-            value = distributor_manager.get_distributor_scratchpad(self.repo_id, self.distributor_id)
+            value = distributor_manager.get_distributor_scratchpad(self.repo_id,
+                                                                   self.distributor_id)
             return value
         except Exception, e:
-            _LOG.exception('Error getting scratchpad for repository [%s]' % self.repo_id)
+            _logger.exception('Error getting scratchpad for repository [%s]' % self.repo_id)
             raise DistributorConduitException(e), None, sys.exc_info()[2]
 
     def set_scratchpad(self, value):
@@ -308,7 +325,7 @@ class DistributorScratchPadMixin(object):
             distributor_manager = manager_factory.repo_distributor_manager()
             distributor_manager.set_distributor_scratchpad(self.repo_id, self.distributor_id, value)
         except Exception, e:
-            _LOG.exception('Error setting scratchpad for repository [%s]' % self.repo_id)
+            _logger.exception('Error setting scratchpad for repository [%s]' % self.repo_id)
             raise DistributorConduitException(e), None, sys.exc_info()[2]
 
 
@@ -331,10 +348,11 @@ class RepoGroupDistributorScratchPadMixin(object):
         """
         try:
             distributor_manager = manager_factory.repo_group_distributor_manager()
-            value = distributor_manager.get_distributor_scratchpad(self.group_id, self.distributor_id)
+            value = distributor_manager.get_distributor_scratchpad(self.group_id,
+                                                                   self.distributor_id)
             return value
         except Exception, e:
-            _LOG.exception('Error getting scratchpad for repository [%s]' % self.group_id)
+            _logger.exception('Error getting scratchpad for repository [%s]' % self.group_id)
             raise DistributorConduitException(e), None, sys.exc_info()[2]
 
     def set_scratchpad(self, value):
@@ -352,9 +370,10 @@ class RepoGroupDistributorScratchPadMixin(object):
         """
         try:
             distributor_manager = manager_factory.repo_group_distributor_manager()
-            distributor_manager.set_distributor_scratchpad(self.group_id, self.distributor_id, value)
+            distributor_manager.set_distributor_scratchpad(self.group_id, self.distributor_id,
+                                                           value)
         except Exception, e:
-            _LOG.exception('Error setting scratchpad for repository [%s]' % self.group_id)
+            _logger.exception('Error setting scratchpad for repository [%s]' % self.group_id)
             raise DistributorConduitException(e), None, sys.exc_info()[2]
 
 
@@ -448,7 +467,9 @@ class AddUnitMixin(object):
             u = Unit(type_id, unit_key, metadata, path)
             return u
         except Exception, e:
-            _LOG.exception('Exception from server requesting unit filename for relative path [%s]' % relative_path)
+            msg = _('Exception from server requesting unit filename for relative path [%s]')
+            msg = msg % relative_path
+            _logger.exception(msg)
             raise ImporterConduitException(e), None, sys.exc_info()[2]
 
     def save_unit(self, unit):
@@ -463,35 +484,80 @@ class AddUnitMixin(object):
         A reference to the provided unit is returned from this call. This call
         will populate the unit's id field with the UUID for the unit.
 
-        @param unit: unit object returned from the init_unit call
-        @type  unit: L{Unit}
+        :param unit: unit object returned from the init_unit call
+        :type  unit: Unit
 
-        @return: object reference to the provided unit, its state updated from the call
-        @rtype:  L{Unit}
+        :return: object reference to the provided unit, its state updated from the call
+        :rtype:  Unit
         """
         try:
-            content_query_manager = manager_factory.content_query_manager()
-            content_manager = manager_factory.content_manager()
             association_manager = manager_factory.repo_unit_association_manager()
 
             # Save or update the unit
             pulp_unit = common_utils.to_pulp_unit(unit)
-            try:
-                existing_unit = content_query_manager.get_content_unit_by_keys_dict(unit.type_id, unit.unit_key)
-                unit.id = existing_unit['_id']
-                content_manager.update_content_unit(unit.type_id, unit.id, pulp_unit)
-                self._updated_count += 1
-            except MissingResource:
-                unit.id = content_manager.add_content_unit(unit.type_id, None, pulp_unit)
-                self._added_count += 1
+            unit.id = self._update_unit(unit, pulp_unit)
 
             # Associate it with the repo
-            association_manager.associate_unit_by_id(self.repo_id, unit.type_id, unit.id, self.association_owner_type, self.association_owner_id)
+            association_manager.associate_unit_by_id(
+                self.repo_id, unit.type_id, unit.id, self.association_owner_type,
+                self.association_owner_id)
 
             return unit
         except Exception, e:
-            _LOG.exception(_('Content unit association failed [%s]' % str(unit)))
+            _logger.exception(_('Content unit association failed [%s]' % str(unit)))
             raise ImporterConduitException(e), None, sys.exc_info()[2]
+
+    def _update_unit(self, unit, pulp_unit):
+        """
+        Update a unit. If it is not found, add it.
+
+        :param unit:        the unit to be updated
+        :type  unit:        pulp.plugins.model.Unit
+        :param pulp_unit:   the unit to be updated, as a dict
+        :type  pulp_unit:   dict
+
+        :return:    id of the updated unit
+        :rtype:     basestring
+        """
+        content_query_manager = manager_factory.content_query_manager()
+        content_manager = manager_factory.content_manager()
+        try:
+            existing_unit = content_query_manager.get_content_unit_by_keys_dict(unit.type_id,
+                                                                                unit.unit_key)
+            unit_id = existing_unit['_id']
+            content_manager.update_content_unit(unit.type_id, unit_id, pulp_unit)
+            self._updated_count += 1
+            return unit_id
+        except MissingResource:
+            _logger.debug(_('cannot update unit; does not exist. adding instead.'))
+            return self._add_unit(unit, pulp_unit)
+
+    def _add_unit(self, unit, pulp_unit):
+        """
+        Add a unit. If it already exists, update it.
+
+        This deals with a race condition where a unit might try to be updated,
+        but does not exist. Before this method can complete, another workflow
+        might add that same unit, causing the DuplicateKeyError below. This can
+        happen if two syncs are running concurrently of repositories that have
+        overlapping content.
+
+        :param unit:        the unit to be updated
+        :type  unit:        pulp.plugins.model.Unit
+        :param pulp_unit:   the unit to be updated, as a dict
+        :type  pulp_unit:   dict
+
+        :return:    id of the updated unit
+        :rtype:     basestring
+        """
+        content_manager = manager_factory.content_manager()
+        try:
+            unit_id = content_manager.add_content_unit(unit.type_id, None, pulp_unit)
+            self._added_count += 1
+            return unit_id
+        except DuplicateKeyError:
+            _logger.debug(_('cannot add unit; already exists. updating instead.'))
+            return self._update_unit(unit, pulp_unit)
 
     def link_unit(self, from_unit, to_unit, bidirectional=False):
         """
@@ -515,13 +581,15 @@ class AddUnitMixin(object):
         content_manager = manager_factory.content_manager()
 
         try:
-            content_manager.link_referenced_content_units(from_unit.type_id, from_unit.id, to_unit.type_id, [to_unit.id])
+            content_manager.link_referenced_content_units(from_unit.type_id, from_unit.id,
+                                                          to_unit.type_id, [to_unit.id])
 
             if bidirectional:
-                content_manager.link_referenced_content_units(to_unit.type_id, to_unit.id, from_unit.type_id, [from_unit.id])
+                content_manager.link_referenced_content_units(to_unit.type_id, to_unit.id,
+                                                              from_unit.type_id, [from_unit.id])
         except Exception, e:
-            _LOG.exception(_('Child link from parent [%(parent)s] to child [%(child)s] failed' %
-                             {'parent': str(from_unit), 'child': str(to_unit)}))
+            _logger.exception(_('Child link from parent [%(parent)s] to child [%(child)s] failed' %
+                              {'parent': str(from_unit), 'child': str(to_unit)}))
             raise ImporterConduitException(e), None, sys.exc_info()[2]
 
 
@@ -531,6 +599,7 @@ class StatusMixin(object):
         self.report_id = report_id
         self.exception_class = exception_class
         self.progress_report = {}
+        self.task_id = get_current_task_id()
 
     def set_progress(self, status):
         """
@@ -542,14 +611,20 @@ class StatusMixin(object):
                publish; the contents may contain whatever information is relevant
                to the distributor implementation so long as it is serializable
         """
+
+        if self.task_id is None:
+            # not running within a task
+            return
+
         try:
             self.progress_report[self.report_id] = status
-            context = dispatch_factory.context()
-            context.report_progress(self.progress_report)
+            TaskStatus.objects(task_id=self.task_id).update_one(
+                set__progress_report=self.progress_report)
         except Exception, e:
-            _LOG.exception('Exception from server setting progress for report [%s]' % self.report_id)
+            _logger.exception(
+                'Exception from server setting progress for report [%s]' % self.report_id)
             try:
-                _LOG.error('Progress value: %s' % str(status))
+                _logger.error('Progress value: %s' % str(status))
             except Exception:
                 # Best effort to print this, but if its that grossly unserializable
                 # the log will tank and we don't want that exception to bubble up
@@ -605,7 +680,6 @@ class PublishReportMixin(object):
         r.canceled_flag = True
         return r
 
-# -- utilities ----------------------------------------------------------------
 
 def do_get_repo_units(repo_id, criteria, exception_class, as_generator=False):
     """
@@ -632,6 +706,6 @@ def do_get_repo_units(repo_id, criteria, exception_class, as_generator=False):
         return list(_transfer_object_generator())
 
     except Exception, e:
-        _LOG.exception('Exception from server requesting all content units for repository [%s]' % repo_id)
+        _logger.exception(
+            'Exception from server requesting all content units for repository [%s]' % repo_id)
         raise exception_class(e), None, sys.exc_info()[2]
-

@@ -11,6 +11,7 @@
 # have received a copy of GPLv2 along with this software; if not, see
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
+import errno
 import math
 import os
 import shutil
@@ -41,7 +42,6 @@ class UploadManagerTests(unittest.TestCase):
         self.upload_working_dir = '/tmp/pulp-upload-manager-test'
         if os.path.exists(self.upload_working_dir):
             shutil.rmtree(self.upload_working_dir)
-        os.makedirs(self.upload_working_dir)
 
         # Recreate for each test to minimize necessary cleanup
         self.mock_bindings = mock.Mock()
@@ -62,37 +62,63 @@ class UploadManagerTests(unittest.TestCase):
 
     # -- test cases -----------------------------------------------------------
 
-    def test_initialize_no_working_dir(self):
-        # Setup
-        self.upload_manager.upload_working_dir += '/mkdir-test'
-        self.assertTrue(not os.path.exists(self.upload_manager.upload_working_dir))
+    def test_init_with_defaults(self):
+        context = mock.MagicMock()
+        context.config = {'filesystem': {'upload_working_dir': '/a/b/c'}}
+        os.makedirs(self.upload_working_dir)
 
-        # Test
-        self.upload_manager.initialize()
+        manager = upload_util.UploadManager.init_with_defaults(context)
 
-        # Verify
-        self.assertTrue(os.path.exists(self.upload_manager.upload_working_dir))
+        self.assertTrue(isinstance(manager, upload_util.UploadManager))
+        self.assertEqual(manager.upload_working_dir, '/a/b/c/default')
 
     def test_initialize_no_trackers(self):
+        os.makedirs(self.upload_working_dir)
+
         # Test
         self.upload_manager.initialize()
 
         # Verify
-        self.assertTrue(self.upload_manager.is_initialized)
         self.assertEqual(0, len(self.upload_manager.list_uploads()))
+
+    @mock.patch('os.listdir')
+    def test_no_workingdir(self, mock_listdir):
+        ex = OSError('a mock error (ENOENT)')
+        ex.errno = errno.ENOENT
+        mock_listdir.side_effect = ex
+
+        os.makedirs(self.upload_working_dir)
+
+        # Test
+        self.upload_manager.initialize()
+
+        # Verify
+        self.assertEqual(0, len(self.upload_manager.list_uploads()))
+
+    @mock.patch('os.listdir')
+    def test_workingdir_err(self, mock_listdir):
+        ex = OSError('a mock error (EIO)')
+        ex.errno = errno.EIO
+        mock_listdir.side_effect = ex
+
+        os.makedirs(self.upload_working_dir)
+
+        # Test
+        self.upload_manager.initialize()
+
+        # Verify
+        self.assertRaises(OSError, self.upload_manager.list_uploads)
 
     def test_initialize_with_trackers(self):
         # Setup
         all_ids = ['tf%s' % i for i in range(0, 2)]
+        os.makedirs(self.upload_working_dir)
 
         for id in all_ids:
             filename = self.upload_manager._tracker_filename(id)
             tf = upload_util.UploadTracker(filename)
             tf.upload_id = id
             tf.save()
-
-        # Test
-        self.upload_manager.initialize()
 
         # Verify
 
@@ -119,6 +145,9 @@ class UploadManagerTests(unittest.TestCase):
 
         # Verify
 
+        # make sure it created the working directory
+        self.assertTrue(os.path.exists(self.upload_working_dir))
+
         # Call to the server was correct
         self.assertEqual(upload_id, MOCK_UPLOAD_ID)
 
@@ -141,6 +170,45 @@ class UploadManagerTests(unittest.TestCase):
         self.assertEqual(tracker.unit_type_id, 'type-1')
         self.assertEqual(tracker.unit_key, {'k1' : 'v1'})
         self.assertEqual(tracker.unit_metadata, {})
+        self.assertEqual(tracker.override_config, None)
+
+    def test_initialize_upload_with_override_config(self):
+        # Setup
+        self.upload_manager.initialize()
+        test_override_config = {'test-key': 'test-value'}
+
+        # Test
+        upload_id = self.upload_manager.initialize_upload('fn-1', 'repo-1', 'type-1', {'k1' : 'v1'}, {},
+                                                          test_override_config)
+
+        # Verify
+
+        # make sure it created the working directory
+        self.assertTrue(os.path.exists(self.upload_working_dir))
+
+        # Call to the server was correct
+        self.assertEqual(upload_id, MOCK_UPLOAD_ID)
+
+        # Tracker added to in memory cache
+        in_memory = self.upload_manager._get_tracker_file_by_id(upload_id)
+        self.assertTrue(in_memory is not None)
+        self.assertEqual(in_memory.upload_id, upload_id)
+
+        # Tracker file created on disk and has all of the specified values
+        tf_filename = self.upload_manager._tracker_filename(upload_id)
+        self.assertTrue(os.path.exists(tf_filename))
+
+        tracker = upload_util.UploadTracker.load(tf_filename)
+        self.assertEqual(tracker.filename, tf_filename)
+        self.assertEqual(tracker.upload_id, MOCK_UPLOAD_ID)
+        self.assertEqual(tracker.location, MOCK_LOCATION)
+        self.assertEqual(tracker.offset, 0)
+        self.assertEqual(tracker.source_filename, 'fn-1')
+        self.assertEqual(tracker.repo_id, 'repo-1')
+        self.assertEqual(tracker.unit_type_id, 'type-1')
+        self.assertEqual(tracker.unit_key, {'k1' : 'v1'})
+        self.assertEqual(tracker.unit_metadata, {})
+        self.assertEqual(tracker.override_config, test_override_config)
 
     def test_upload_single_pass(self):
         # Setup
@@ -345,14 +413,6 @@ class UploadManagerTests(unittest.TestCase):
 
         # Verify
         self.assertEqual(0, self.mock_upload_bindings.import_upload.call_count)
-
-    def test_uninitialized_calls(self):
-        # Test
-        self.assertRaises(upload_util.ManagerUninitializedException, self.upload_manager.initialize_upload, 'f', 'r', 't', {'k' : 'v'}, 'm')
-        self.assertRaises(upload_util.ManagerUninitializedException, self.upload_manager.upload, 'i')
-        self.assertRaises(upload_util.ManagerUninitializedException, self.upload_manager.import_upload, 'i')
-        self.assertRaises(upload_util.ManagerUninitializedException, self.upload_manager.list_uploads)
-        self.assertRaises(upload_util.ManagerUninitializedException, self.upload_manager.delete_upload, 'i')
 
     def test_missing_upload_requests(self):
         # Setup

@@ -89,7 +89,7 @@ STRATEGY_OPTION = \
 REPO_ENABLED = _('Repository enabled.')
 REPO_DISABLED = _('Repository disabled.')
 PUBLISH_SUCCEEDED = _('Publish succeeded.')
-PUBLISH_FAILED = _('Publish failed. See: pulp.log for details.')
+PUBLISH_FAILED = _('Publish failed. See: pulp log for details.')
 NODE_ACTIVATED = _('Consumer activated as child node.')
 NODE_DEACTIVATED = _('Child node deactivated.')
 BIND_SUCCEEDED = _('Node bind succeeded.')
@@ -523,7 +523,7 @@ class NodeUpdateCommand(PollingCommand):
             return os.EX_DATAERR
 
     def progress(self, task, spinner):
-        self.tracker.display(task.progress)
+        self.tracker.display(task.progress_report)
 
     def succeeded(self, task):
         report = task.result['details'].values()[0]

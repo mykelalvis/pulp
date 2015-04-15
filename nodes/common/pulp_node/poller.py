@@ -10,11 +10,10 @@
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
 import httplib
-
 from time import sleep
 from gettext import gettext as _
 
-from pulp.server.dispatch.constants import CALL_COMPLETE_STATES, CALL_ERROR_STATE
+from pulp.common.constants import CALL_COMPLETE_STATES, CALL_ERROR_STATE
 
 
 # --- i18m ------------------------------------------------------------------------------
@@ -113,10 +112,10 @@ class TaskPoller(object):
         :return The new hash.
         :rtype: int
         """
-        _hash = hash(repr(task.progress))
+        _hash = hash(repr(task.progress_report))
         if _hash != last_hash:
-            if task.progress:
-                reported = task.progress.values()[0]
+            if task.progress_report:
+                reported = task.progress_report.values()[0]
                 progress.__dict__.update(reported)
                 progress.updated()
         return _hash

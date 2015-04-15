@@ -1,16 +1,3 @@
-#
-# Copyright (c) 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-#
-
 """
 Pulp (gofer) plugin.
 Contains recurring actions and remote classes.
@@ -18,49 +5,226 @@ Contains recurring actions and remote classes.
 
 import os
 
-from hashlib import sha256
+from time import sleep
+from gettext import gettext as _
 from logging import getLogger
 
+from M2Crypto import RSA, BIO
 from M2Crypto.X509 import X509Error
 
-from gofer.decorators import *
+from gofer.decorators import initializer, remote, action
 from gofer.agent.plugin import Plugin
-from gofer.messaging import Topic
-from gofer.messaging.producer import Producer
 from gofer.pmon import PathMonitor
 from gofer.agent.rmi import Context
+from gofer.messaging.auth import ValidationFailed
 
 from pulp.common.bundle import Bundle
-from pulp.common.config import Config
+from pulp.common.config import parse_bool
 from pulp.agent.lib.dispatcher import Dispatcher
 from pulp.agent.lib.conduit import Conduit as HandlerConduit
 from pulp.bindings.server import PulpConnection
 from pulp.bindings.bindings import Bindings
+from pulp.bindings.exceptions import NotFoundException
+from pulp.client.consumer.config import read_config
+
 
 log = getLogger(__name__)
+
+# pulp consumer configuration
+# the graph (cfg) is provided for syntactic convenience
+
+pulp_conf = read_config()
+cfg = pulp_conf.graph()
+
+# monitor file paths
+path_monitor = PathMonitor()
+
+# this plugin object
 plugin = Plugin.find(__name__)
-dispatcher = Dispatcher()
-cfg = plugin.cfg()
+
+# registration status
+registered = False
 
 
-# --- utils ------------------------------------------------------------------
-
-
-def secret():
+class ValidateRegistrationFailed(Exception):
     """
-    Get the shared secret used for auth of RMI requests.
-    :return: The sha256 for the certificate
+    The REST call to the server to validate registration failed.
+    """
+    pass
+
+
+@initializer
+def init_plugin():
+    """
+    Plugin initialization.
+    Called exactly once after the plugin has been loaded.
+      1. Update the plugin configuration using the consumer configuration.
+      2. Register the consumer certificate bundle path for monitoring.
+      3. Start the path monitor.
+      4. Validate registration.
+      5. If registered, update settings.
+    """
+    path = os.path.join(cfg.filesystem.id_cert_dir, cfg.filesystem.id_cert_filename)
+    path_monitor.add(path, certificate_changed)
+    path_monitor.start()
+    while True:
+        try:
+            validate_registration()
+            if registered:
+                update_settings()
+            # DONE
+            break
+        except ValidateRegistrationFailed:
+            sleep(60)
+
+
+def validate_registration():
+    """
+    Validate the registration status using the Pulp REST API.
+    This is done by fetching the consumer using the ID contained in the certificate.
+    Then, matching the UID in the certificate with the _id (database ID) returned
+    by the server.
+    """
+    global registered
+    registered = False
+    bundle = ConsumerX509Bundle()
+
+    if not bundle.valid():
+        return
+
+    try:
+        consumer_id = bundle.cn()
+        bindings = PulpBindings()
+        reply = bindings.consumer.consumer(consumer_id)
+        _id = reply.response_body['_id']['$oid']
+        if _id == bundle.uid():
+            registered = True
+    except NotFoundException:
+        # not registered
+        pass
+    except Exception, e:
+        msg = _('validate registration failed: %(r)s')
+        log.warn(msg, {'r': str(e)})
+        raise ValidateRegistrationFailed()
+
+
+def update_settings():
+    """
+    Update the plugin settings using the consumer configuration.
+    """
+    pulp_conf.update(read_config())
+    scheme = cfg.messaging.scheme
+    host = cfg.messaging.host or cfg.server.host
+    port = cfg.messaging.port
+    adapter = cfg.messaging.transport
+    plugin.cfg.messaging.url = '%s+%s://%s:%s' % (adapter, scheme, host, port)
+    plugin.cfg.messaging.uuid = get_agent_id()
+    plugin.cfg.messaging.cacert = cfg.messaging.cacert
+    plugin.cfg.messaging.clientcert = cfg.messaging.clientcert or \
+        os.path.join(cfg.filesystem.id_cert_dir, cfg.filesystem.id_cert_filename)
+    plugin.authenticator = Authenticator()
+    log.info(_('plugin configuration updated'))
+
+
+def certificate_changed(path):
+    """
+    The consumer certificate bundle has changed.
+    This indicates a change in registration to pulp.
+      1. Validate registration.
+      2. If registered, attach to the message broker.
+         If not, detach.
+    :param path: The absolute path to the changed bundle.
+    :type path: str
+    """
+    log.info(_('changed: %(p)s'), {'p': path})
+    while True:
+        try:
+            validate_registration()
+            if registered:
+                update_settings()
+                plugin.attach()
+            else:
+                plugin.detach()
+            # DONE
+            break
+        except ValidateRegistrationFailed:
+            sleep(60)
+
+
+def get_agent_id():
+    """
+    Get the agent ID.
+    Format: pulp.agent.<consumer_id>
+    :return: The agent ID or None when not registered.
     :rtype: str
     """
     bundle = ConsumerX509Bundle()
-    content = bundle.read()
-    crt = bundle.split(content)[1]
-    if content:
-        hash = sha256()
-        hash.update(crt)
-        return hash.hexdigest()
+    consumer_id = bundle.cn()
+    if consumer_id:
+        return 'pulp.agent.%s' % consumer_id
     else:
         return None
+
+
+def get_secret():
+    """
+    Get the shared secret.
+    The shared secret is the DB _id for the consumer object as specified
+    in the UID part of the certificate distinguished name (DN).
+    :return: The secret.
+    :rtype: str
+    """
+    bundle = ConsumerX509Bundle()
+    return bundle.uid()
+
+
+class Authenticator(object):
+    """
+    Provides message authentication using RSA keys.
+    The server and the agent sign sent messages using their private keys
+    and validate received messages using each others public keys.
+    """
+
+    def sign(self, digest):
+        """
+        Sign the specified message.
+        :param digest: A message digest.
+        :type digest: str
+        :return: The message signature.
+        :rtype: str
+        """
+        fp = open(cfg.authentication.rsa_key)
+        try:
+            pem = fp.read()
+            bfr = BIO.MemoryBuffer(pem)
+            key = RSA.load_key_bio(bfr)
+            return key.sign(digest)
+        finally:
+            fp.close()
+
+    def validate(self, document, digest, signature):
+        """
+        Validate the specified message and signature.
+        :param document: The original signed document.
+        :type document: str
+        :param digest: A message digest.
+        :type digest: str
+        :param signature: A message signature.
+        :type signature: str
+        :raises ValidationFailed: when message is not valid.
+        """
+        fp = open(cfg.server.rsa_pub)
+        try:
+            pem = fp.read()
+            bfr = BIO.MemoryBuffer(pem)
+            key = RSA.load_pub_key_bio(bfr)
+            try:
+                if not key.verify(digest, signature):
+                    raise ValidationFailed()
+            except RSA.RSAError:
+                raise ValidationFailed()
+        finally:
+            fp.close()
 
 
 class ConsumerX509Bundle(Bundle):
@@ -69,7 +233,8 @@ class ConsumerX509Bundle(Bundle):
     """
 
     def __init__(self):
-        Bundle.__init__(self, cfg.rest.clientcert)
+        path = os.path.join(cfg.filesystem.id_cert_dir, cfg.filesystem.id_cert_filename)
+        Bundle.__init__(self, path)
 
     def cn(self):
         """
@@ -82,19 +247,40 @@ class ConsumerX509Bundle(Bundle):
         try:
             return Bundle.cn(self)
         except X509Error:
-            log.warn('certificate: %s, not valid', self.path)
+            msg = _('certificate: %(p)s, not valid')
+            log.warn(msg, {'p': self.path})
+
+    def uid(self):
+        """
+        Get the userid (UID) part of the certificate subject.
+        Returns None, if the certificate is invalid.
+        :return The userid (UID) part of the certificate subject or None when
+            the certificate is not found or invalid.
+        :rtype: str
+        """
+        try:
+            return Bundle.uid(self)
+        except X509Error:
+            msg = _('certificate: %(p)s, not valid')
+            log.warn(msg, {'p': self.path})
 
 
 class PulpBindings(Bindings):
     """
     Pulp (REST) API.
     """
-    
     def __init__(self):
-        host = cfg.rest.host
-        port = int(cfg.rest.port)
-        cert = cfg.rest.clientcert
-        connection = PulpConnection(host, port, cert_filename=cert)
+        host = cfg.server.host
+        port = int(cfg.server.port)
+        verify_ssl = parse_bool(cfg.server.verify_ssl)
+        ca_path = cfg.server.ca_path
+        cert = os.path.join(cfg.filesystem.id_cert_dir, cfg.filesystem.id_cert_filename)
+        connection = PulpConnection(
+            host=host,
+            port=port,
+            cert_filename=cert,
+            verify_ssl=verify_ssl,
+            ca_path=ca_path)
         Bindings.__init__(self, connection)
 
 
@@ -120,12 +306,7 @@ class Conduit(HandlerConduit):
         :return: The consumer configuration object.
         :rtype: pulp.common.config.Config
         """
-        paths = ['/etc/pulp/consumer/consumer.conf']
-        overrides = os.path.expanduser('~/.pulp/consumer.conf')
-        if os.path.exists(overrides):
-            paths.append(overrides)
-        cfg = Config(*paths)
-        return cfg
+        return pulp_conf
 
     def update_progress(self, report):
         """
@@ -147,122 +328,32 @@ class Conduit(HandlerConduit):
         return context.cancelled()
 
 
-# --- actions ----------------------------------------------------------------
+# --- scheduled actions ------------------------------------------------------
 
 
-class Heartbeat:
+@action(minutes=cfg.profile.minutes)
+def update_profile():
     """
-    Provide agent heartbeat.
+    Report the unit profile(s).
     """
+    if registered:
+        profile = Profile()
+        profile.send()
+    else:
+        msg = _('not registered, profile report skipped')
+        log.info(msg)
 
-    __producer = None
-
-    @classmethod
-    def producer(cls):
-        """
-        Get the cached producer.
-        :return: A producer.
-        :rtype: Producer
-        """
-        if not cls.__producer:
-            broker = plugin.getbroker()
-            url = str(broker.url)
-            cls.__producer = Producer(url=url)
-        return cls.__producer
-
-    @remote
-    @action(seconds=cfg.heartbeat.seconds)
-    def send(self):
-        """
-        Send the heartbeat.
-        The delay defines when the next heartbeat
-        should be expected.
-        """
-        topic = Topic('heartbeat')
-        delay = int(cfg.heartbeat.seconds)
-        bundle = ConsumerX509Bundle()
-        consumer_id = bundle.cn()
-        if consumer_id:
-            p = self.producer()
-            body = dict(uuid=consumer_id, next=delay)
-            p.send(topic, ttl=delay, heartbeat=body)
-        return consumer_id
-
-
-class RegistrationMonitor:
-    """
-    Monitor the registration (consumer) certificate for changes.
-    When a change is detected, the bus attachment is changed
-    as appropriate.  When removed, we set our UUID to None which
-    will cause us to detach.  When changed, our UUID is changed
-    which causes a detach/attach to be sure we are attached with
-    the correct UUID.
-    @cvar pmon: A path monitor object.
-    :type pmon: PathMonitor
-    """
-
-    pmon = PathMonitor()
-
-    @classmethod
-    @action(days=0x8E94)
-    def init(cls):
-        """
-        Start path monitor to track changes in the
-        pulp identity certificate.
-        """
-        path = cfg.rest.clientcert
-        cls.pmon.add(path, cls.changed)
-        cls.pmon.start()
-
-    @classmethod
-    def changed(cls, path):
-        """
-        A change in the pulp certificate has been detected.
-        When deleted: disconnect from qpid by setting the UUID to None.
-        When added/updated: reconnect to qpid.
-        :param path: The changed file (ignored).
-        :type path: str
-        """
-        log.info('changed: %s', path)
-        bundle = ConsumerX509Bundle()
-        consumer_id = bundle.cn()
-        plugin.setuuid(consumer_id)
-
-
-class Synchronization:
-    """
-    Misc actions used to synchronize with the server.
-    """
-            
-    @action(minutes=cfg.profile.minutes)
-    def profile(self):
-        """
-        Report the unit profile(s).
-        """
-        if self.registered():
-            profile = Profile()
-            profile.send()
-        else:
-            log.info('not registered, profile report skipped')
-            
-    def registered(self):
-        """
-        Get registration status.
-        """
-        bundle = ConsumerX509Bundle()
-        consumer_id = bundle.cn()
-        return (consumer_id is not None)
 
 # --- API --------------------------------------------------------------------
 
 
-class Consumer:
+class Consumer(object):
     """
     Consumer Management.
     """
 
-    @remote(secret=secret)
-    def unregistered(self):
+    @remote(secret=get_secret)
+    def unregister(self):
         """
         Notification that the consumer had been unregistered.
         The action is to clean up registration and bind artifacts.
@@ -272,10 +363,11 @@ class Consumer:
         bundle = ConsumerX509Bundle()
         bundle.delete()
         conduit = Conduit()
+        dispatcher = Dispatcher()
         report = dispatcher.clean(conduit)
         return report.dict()
 
-    @remote(secret=secret)
+    @remote(secret=get_secret)
     def bind(self, bindings, options):
         """
         Bind to the specified repository ID.
@@ -290,10 +382,11 @@ class Consumer:
         :rtype: DispatchReport
         """
         conduit = Conduit()
+        dispatcher = Dispatcher()
         report = dispatcher.bind(conduit, bindings, options)
         return report.dict()
 
-    @remote(secret=secret)
+    @remote(secret=get_secret)
     def unbind(self, bindings, options):
         """
         Unbind to the specified repository ID.
@@ -307,16 +400,17 @@ class Consumer:
         :rtype: DispatchReport
         """
         conduit = Conduit()
+        dispatcher = Dispatcher()
         report = dispatcher.unbind(conduit, bindings, options)
         return report.dict()
 
 
-class Content:
+class Content(object):
     """
     Content Management.
     """
 
-    @remote(secret=secret)
+    @remote(secret=get_secret)
     def install(self, units, options):
         """
         Install the specified content units using the specified options.
@@ -330,10 +424,11 @@ class Content:
         :rtype: DispatchReport
         """
         conduit = Conduit()
+        dispatcher = Dispatcher()
         report = dispatcher.install(conduit, units, options)
         return report.dict()
 
-    @remote(secret=secret)
+    @remote(secret=get_secret)
     def update(self, units, options):
         """
         Update the specified content units using the specified options.
@@ -347,10 +442,11 @@ class Content:
         :rtype: DispatchReport
         """
         conduit = Conduit()
+        dispatcher = Dispatcher()
         report = dispatcher.update(conduit, units, options)
         return report.dict()
 
-    @remote(secret=secret)
+    @remote(secret=get_secret)
     def uninstall(self, units, options):
         """
         Uninstall the specified content units using the specified options.
@@ -364,16 +460,17 @@ class Content:
         :rtype: DispatchReport
         """
         conduit = Conduit()
+        dispatcher = Dispatcher()
         report = dispatcher.uninstall(conduit, units, options)
         return report.dict()
 
 
-class Profile:
+class Profile(object):
     """
     Profile Management
     """
 
-    @remote(secret=secret)
+    @remote(secret=get_secret)
     def send(self):
         """
         Send the content profile(s) to the server.
@@ -385,12 +482,20 @@ class Profile:
         consumer_id = bundle.cn()
         conduit = Conduit()
         bindings = PulpBindings()
+        dispatcher = Dispatcher()
         report = dispatcher.profile(conduit)
-        log.info('profile: %s' % report)
+
+        msg = _('reporting profiles: %(r)s')
+        log.debug(msg, {'r': report})
+
         for type_id, profile_report in report.details.items():
             if not profile_report['succeeded']:
                 continue
+
             details = profile_report['details']
             http = bindings.profile.send(consumer_id, type_id, details)
-            log.debug('profile (%s), reported: %d', type_id, http.response_code)
+
+            msg = _('profile (%(t)s), reported: %(r)s')
+            log.info(msg, {'t': type_id, 'r': http.response_code})
+
         return report.dict()

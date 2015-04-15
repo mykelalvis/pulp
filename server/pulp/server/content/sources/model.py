@@ -13,29 +13,20 @@ import sys
 import os
 import re
 
-from urlparse import urlsplit, urljoin
+from urlparse import urljoin
 from logging import getLogger
 from ConfigParser import ConfigParser
 
-from nectar.downloaders.local import LocalFileDownloader
-from nectar.downloaders.threaded import HTTPThreadedDownloader
-
-from pulp.server.managers import factory as managers
-from pulp.plugins.loader import api as plugins
+from pulp.common.constants import PRIMARY_ID
 from pulp.plugins.conduits.cataloger import CatalogerConduit
-
+from pulp.plugins.loader import api as plugins
 from pulp.server.content.sources import constants
-from pulp.server.content.sources.descriptor import is_valid, to_seconds, nectar_config
+from pulp.server.content.sources.descriptor import is_valid, to_seconds, DEFAULT
+from pulp.server.managers import factory as managers
 
 
 log = getLogger(__name__)
 
-# map scheme to nectar dowloader
-DOWNLOADER = {
-    'file': LocalFileDownloader,
-    'http': HTTPThreadedDownloader,
-    'https': HTTPThreadedDownloader,
-}
 
 # used to split list of paths
 PATHS_REGEX = re.compile(r'\s+')
@@ -58,8 +49,8 @@ class Request(object):
     :type url: str
     :ivar destination: The absolute path used to store the downloaded file.
     :type destination: str
-    :ivar sources: A list of tuple: (ContentSource, url).
-    :type sources: list
+    :ivar sources: An iterator of tuple: (ContentSource, url).
+    :type sources: iterator
     :ivar index: Used to iterate the list of sources.
     :type index: int
     :ivar errors: The list of download error messages.
@@ -84,7 +75,7 @@ class Request(object):
         self.url = url
         self.destination = destination
         self.downloaded = False
-        self.sources = []
+        self.sources = iter([])
         self.index = 0
         self.errors = []
         self.data = None
@@ -109,26 +100,7 @@ class Request(object):
             url = entry[constants.URL]
             resolved.append((source, url))
         resolved.sort()
-        self.sources = resolved
-
-    def next_source(self):
-        """
-        Used to iterate the list of sources.
-        :return: The next source or None when the list is exhausted.
-        :rtype: ContentSource
-        """
-        if self.has_source():
-            source = self.sources[self.index]
-            self.index += 1
-            return source
-
-    def has_source(self):
-        """
-        Get whether the list of content sources has been exhausted.
-        :return: True if not exhausted.
-        :rtype: bool
-        """
-        return self.index < len(self.sources)
+        self.sources = iter(resolved)
 
 
 class ContentSource(object):
@@ -159,17 +131,19 @@ class ContentSource(object):
         sources = {}
         _dir = conf_d or ContentSource.CONF_D
         for name in os.listdir(_dir):
-            if not name.endswith('.conf'):
-                continue
             path = os.path.join(_dir, name)
+            if not os.path.isfile(path):
+                continue
             cfg = ConfigParser()
             cfg.read(path)
             for section in cfg.sections():
-                descriptor = dict(cfg.items(section))
+                descriptor = {}
+                descriptor.update(DEFAULT)
+                descriptor.update(dict(cfg.items(section)))
                 source = ContentSource(section, descriptor)
-                if not source.is_valid():
+                if not source.enabled:
                     continue
-                if not source.enabled():
+                if not source.is_valid():
                     continue
                 sources[source.id] = source
         return sources
@@ -192,23 +166,27 @@ class ContentSource(object):
         :return: True if valid.
         :rtype: bool
         """
+        valid = False
         try:
-            self.downloader()
-            plugin_id = self.descriptor[constants.TYPE]
-            plugins.get_cataloger_by_id(plugin_id)
-            return is_valid(self.id, self.descriptor)
+            if is_valid(self.id, self.descriptor):
+                self.get_cataloger()
+                self.get_downloader()
+                valid = True
         except Exception:
-            return False
+            log.exception('source [%s] not valid', self.id)
+        return valid
 
+    @property
     def enabled(self):
         """
         Get whether the content source is enabled.
         :return: True if enabled.
         :rtype: bool
         """
-        enabled = self.descriptor.get(constants.ENABLED)
+        enabled = self.descriptor[constants.ENABLED]
         return enabled.lower() in ('1', 'true', 'yes')
 
+    @property
     def priority(self):
         """
         Get the content source priority (0=lowest)
@@ -216,8 +194,9 @@ class ContentSource(object):
         :return: The priority.
         :rtype: int
         """
-        return int(self.descriptor.get(constants.PRIORITY, 0))
+        return int(self.descriptor[constants.PRIORITY])
 
+    @property
     def expires(self):
         """
         Get the duration in seconds of how long content catalog entries
@@ -226,8 +205,9 @@ class ContentSource(object):
         :return: The expiration in seconds.
         :rtype int
         """
-        return to_seconds(self.descriptor.get(constants.EXPIRES, '24h'))
+        return to_seconds(self.descriptor[constants.EXPIRES])
 
+    @property
     def base_url(self):
         """
         Get the base URL used to inspect the content source
@@ -237,6 +217,16 @@ class ContentSource(object):
         """
         return self.descriptor[constants.BASE_URL]
 
+    @property
+    def max_concurrent(self):
+        """
+        Get the download concurrency specified in the source definition.
+        :return: The download concurrency.
+        :rtype: int
+        """
+        return int(self.descriptor[constants.MAX_CONCURRENT])
+
+    @property
     def urls(self):
         """
         Get the (optional) list of URLs specified in the descriptor.
@@ -247,8 +237,8 @@ class ContentSource(object):
         url_list = []
         paths = self.descriptor.get(constants.PATHS)
         if not paths:
-            return [self.base_url()]
-        base = self.base_url()
+            return [self.base_url]
+        base = self.base_url
         if not base.endswith('/'):
             base += '/'
         for path in re.split(PATHS_REGEX, paths):
@@ -260,7 +250,25 @@ class ContentSource(object):
             url_list.append(url)
         return url_list
 
-    def downloader(self):
+    def get_conduit(self):
+        """
+        Get a plugin conduit.
+        :return: A plugin conduit.
+        :rtype CatalogerConduit
+        """
+        return CatalogerConduit(self.id, self.expires)
+
+    def get_cataloger(self):
+        """
+        Get the cataloger plugin.
+        :return: A cataloger plugin.
+        :rtype: pulp.server.plugins.cataloger.Cataloger
+        """
+        plugin_id = self.descriptor[constants.TYPE]
+        plugin, cfg = plugins.get_cataloger_by_id(plugin_id)
+        return plugin
+
+    def get_downloader(self):
         """
         Get a fully configured nectar downloader.
         The returned downloader is configured using properties defined
@@ -268,14 +276,9 @@ class ContentSource(object):
         :return: A nectar downloader.
         :rtype: nectar.downloaders.Downloader.
         """
-        url = self.base_url()
-        conf = nectar_config(self.descriptor)
-        try:
-            parts = urlsplit(url)
-            downloader = DOWNLOADER[parts.scheme](conf)
-            return downloader
-        except KeyError:
-            raise ValueError('unsupported protocol: %s', url)
+        conduit = self.get_conduit()
+        plugin = self.get_cataloger()
+        return plugin.get_downloader(conduit, self.descriptor, self.base_url)
 
     def refresh(self, cancel_event):
         """
@@ -287,10 +290,9 @@ class ContentSource(object):
         :rtype: list of: RefreshReport
         """
         reports = []
-        plugin_id = self.descriptor[constants.TYPE]
-        plugin, cfg = plugins.get_cataloger_by_id(plugin_id)
-        conduit = CatalogerConduit(self.id, self.expires())
-        for url in self.urls():
+        conduit = self.get_conduit()
+        plugin = self.get_cataloger()
+        for url in self.urls:
             if cancel_event.isSet():
                 break
             conduit.reset()
@@ -309,6 +311,17 @@ class ContentSource(object):
                 reports.append(report)
         return reports
 
+    def dict(self):
+        """
+        Dictionary representation.
+        :return: A dictionary representation.
+        :rtype: dict
+        """
+        d = {}
+        d.update(self.descriptor)
+        d[constants.SOURCE_ID] = self.id
+        return d
+
     def __eq__(self, other):
         return self.id == other.id
 
@@ -316,10 +329,10 @@ class ContentSource(object):
         return hash(self.id)
 
     def __gt__(self, other):
-        return self.priority() > other.priority()
+        return self.priority > other.priority
 
     def __lt__(self, other):
-        return self.priority() < other.priority()
+        return self.priority < other.priority
 
 
 class PrimarySource(ContentSource):
@@ -335,10 +348,26 @@ class PrimarySource(ContentSource):
         :param downloader: A nectar downloader.
         :type downloader: nectar.downloaders.base.Downloader
         """
-        ContentSource.__init__(self, '__primary__', {})
+        ContentSource.__init__(self, PRIMARY_ID, {})
         self._downloader = downloader
 
-    def downloader(self):
+    @property
+    def priority(self):
+        """
+        Must be last.
+        """
+        return sys.maxint
+
+    @property
+    def max_concurrent(self):
+        """
+        Get the download concurrency specified in the source definition.
+        :return: The download concurrency.
+        :rtype: int
+        """
+        return int(DEFAULT[constants.MAX_CONCURRENT])
+
+    def get_downloader(self):
         """
         Get the wrapped downloader.
         :return: The wrapped (primary) downloader.
@@ -352,16 +381,57 @@ class PrimarySource(ContentSource):
         """
         pass
 
-    def priority(self):
+
+class DownloadDetails(object):
+    """
+    Download details.
+    :ivar total_succeeded: The total number of downloads that succeeded.
+    :type total_succeeded: int
+    :ivar total_failed: The total number of downloads that failed.
+    :type total_failed: int
+    """
+
+    def __init__(self):
+        self.total_succeeded = 0
+        self.total_failed = 0
+
+    def dict(self):
         """
-        Must be last.
+        Dictionary representation.
+        :return: A dictionary representation.
+        :rtype: dict
         """
-        return sys.maxint
+        return self.__dict__
+
+
+class DownloadReport(object):
+    """
+    Download report.
+    :ivar total_sources: The total number of loaded sources.
+    :type total_sources: int
+    :ivar downloads: Dict of: DownloadDetails keyed by source ID.
+    :type downloads: dict
+    """
+
+    def __init__(self):
+        self.total_sources = 0
+        self.downloads = {}
+
+    def dict(self):
+        """
+        Dictionary representation.
+        :return: A dictionary representation.
+        :rtype: dict
+        """
+        return dict(total_sources=self.total_sources,
+                    downloads=dict([(k, v.dict()) for k, v in self.downloads.items()]))
 
 
 class RefreshReport(object):
     """
     Refresh report.
+    :ivar source_id: The content source ID.
+    :type source_id: str
     :ivar succeeded: Indicates whether the refresh was successful.
     :type succeeded: bool
     :ivar added_count: The number of entries added to the catalog.
@@ -385,3 +455,13 @@ class RefreshReport(object):
         self.added_count = 0
         self.deleted_count = 0
         self.errors = []
+
+    def dict(self):
+        """
+        Dictionary representation.
+        :return: A dictionary representation.
+        :rtype: dict
+        """
+        return dict(source_id=self.source_id, url=self.url, succeeded=self.succeeded,
+                    added_count=self.added_count, deleted_count=self.deleted_count,
+                    errors=self.errors)

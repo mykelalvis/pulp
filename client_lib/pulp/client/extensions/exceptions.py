@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Centralized logic for handling the series of expected exceptions coming from
 server operations (i.e. the 400 series of HTTP status codes). The handling
@@ -25,18 +12,18 @@ to catch and display an exception using the consistent formatting but still
 react to it in the extension itself.
 """
 
+import logging
+import os
 from _socket import gaierror
 from gettext import gettext as _
-import logging
-from M2Crypto import X509
-from M2Crypto.SSL.Checker import WrongHost
-import os
 from socket import error as socket_error
 
-from pulp.bindings.exceptions import *
+from M2Crypto import X509
+from M2Crypto.SSL.Checker import WrongHost
+
+from pulp.bindings import exceptions as bindings_exceptions
 from pulp.client.arg_utils import InvalidConfig
 
-# -- constants ----------------------------------------------------------------
 
 CODE_BAD_REQUEST = os.EX_DATAERR
 CODE_NOT_FOUND = os.EX_DATAERR
@@ -51,9 +38,8 @@ CODE_WRONG_HOST = os.EX_DATAERR
 CODE_UNKNOWN_HOST = os.EX_CONFIG
 CODE_SOCKET_ERROR = os.EX_CONFIG
 
-LOG = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
-# -- classes ------------------------------------------------------------------
 
 class ExceptionHandler:
     """
@@ -85,18 +71,22 @@ class ExceptionHandler:
 
         # Determine which method to call based on exception type
         mappings = (
-            (BadRequestException,   self.handle_bad_request),
-            (NotFoundException,     self.handle_not_found),
-            (ConflictException,     self.handle_conflict),
-            (ConnectionException,   self.handle_connection_error),
-            (PermissionsException,  self.handle_permission),
-            (InvalidConfig,         self.handle_invalid_config),
-            (WrongHost,             self.handle_wrong_host),
-            (gaierror,              self.handle_unknown_host),
-            (socket_error,          self.handle_socket_error),
-            (PulpServerException,   self.handle_server_error),
-            (ClientSSLException,    self.handle_client_ssl),
-            (ApacheServerException, self.handle_apache_error),
+            (bindings_exceptions.BadRequestException, self.handle_bad_request),
+            (bindings_exceptions.NotFoundException, self.handle_not_found),
+            (bindings_exceptions.ConflictException, self.handle_conflict),
+            (bindings_exceptions.ConnectionException, self.handle_connection_error),
+            (bindings_exceptions.PermissionsException, self.handle_permission),
+            (InvalidConfig, self.handle_invalid_config),
+            (WrongHost, self.handle_wrong_host),
+            (gaierror, self.handle_unknown_host),
+            (socket_error, self.handle_socket_error),
+            (bindings_exceptions.PulpServerException, self.handle_server_error),
+            (bindings_exceptions.ClientCertificateExpiredException,
+             self.handle_expired_client_cert),
+            (bindings_exceptions.CertificateVerificationException,
+             self.handle_ssl_validation_error),
+            (bindings_exceptions.MissingCAPathException, self.handle_missing_ca_path_exception),
+            (bindings_exceptions.ApacheServerException, self.handle_apache_error),
         )
 
         handle_func = self.handle_unexpected
@@ -122,24 +112,38 @@ class ExceptionHandler:
         # The following keys may be present to further classify the exception:
         # property_names - values for these properties were invalid
         # missing_property_names - required properties that were not specified
-
-        if 'property_names' in e.extra_data:
+        if 'error' in e.extra_data:
+            self._display_coded_error(e.extra_data.get('error'))
+            return CODE_BAD_REQUEST
+        elif 'property_names' in e.extra_data:
             msg = _('The values for the following properties were invalid: %(p)s')
-            msg = msg % {'p' : ', '.join(e.extra_data['property_names'])}
+            msg = msg % {'p': ', '.join(e.extra_data['property_names'])}
         elif 'missing_property_names' in e.extra_data:
             msg = _('The following properties are required but were not provided: %(p)s')
-            msg = msg % {'p' : ', '.join(e.extra_data['missing_property_names'])}
+            msg = msg % {'p': ', '.join(e.extra_data['missing_property_names'])}
         else:
             msg = _('The server indicated one or more values were incorrect. The server '
-                  'provided the following error message:')
+                    'provided the following error message:')
             self.prompt.render_failure_message(msg)
 
             self.prompt.render_failure_message('   %s' % e.error_message)
-            msg = _('More information can be found in the client log file %(l)s.')
-            msg = msg % {'l' : self._log_filename()}
+            msg = _('More information may be found using the -v flag.')
 
         self.prompt.render_failure_message(msg)
         return CODE_BAD_REQUEST
+
+    def _display_coded_error(self, e):
+        """
+        Recursively render a coded error and the errors contained by it.
+
+        :param e: error to display
+        :type  e: dictionary containing error information.
+        """
+        malformed_msg = _('Request error does not contain a description, '
+                          'please use -v option for more information.')
+        self.prompt.render_failure_message('%s' % (e.get('description', malformed_msg)))
+        for suberror in e.get('sub_errors', []):
+            self._display_coded_error(suberror)
 
     def handle_not_found(self, e):
         """
@@ -180,7 +184,7 @@ class ExceptionHandler:
 
         if 'resource_id' in e.extra_data:
             msg = _('A resource with the ID "%(i)s" already exists.')
-            msg = msg % {'i' : e.extra_data['resource_id']}
+            msg = msg % {'i': e.extra_data['resource_id']}
         elif 'reasons' in e.extra_data:
             msg = _('The requested operation conflicts with one or more operations '
                     'already queued for the resource. The following operations on the '
@@ -188,14 +192,13 @@ class ExceptionHandler:
             msg = msg
 
             for r in e.extra_data['reasons']:
-                msg += _('Resource:  %(t)s - %(i)s\n') % {'t' : r['resource_type'],
-                                                       'i' : r['resource_id']}
-                msg += _('Operation: %(o)s') % {'o' : r['operation']}
+                msg += _('Resource:  %(t)s - %(i)s\n') % {'t': r['resource_type'],
+                                                          'i': r['resource_id']}
+                msg += _('Operation: %(o)s') % {'o': r['operation']}
         else:
             msg = _('The requested operation could not execute due to an unexpected '
-                    'conflict on the server. More information can be found in the '
-                    'client log file %(l)s.')
-            msg = msg % {'l' : self._log_filename()}
+                    'conflict on the server. More information may be found using the '
+                    '-v flag.')
 
         self.prompt.render_failure_message(msg)
         return CODE_CONFLICT
@@ -206,15 +209,12 @@ class ExceptionHandler:
 
         :return: appropriate exit code for this error
         """
-
         self._log_server_exception(e)
 
         # This is a very vague error condition; the best we can do is rely on
         # the exception dump to the log file
-
-        msg = _('An internal error occurred on the Pulp server. More information '
-                'can be found in the client log file %(l)s.')
-        msg = msg % {'l' : self._log_filename()}
+        msg = _('An internal error occurred on the Pulp server:\n\n%(e)s')
+        msg = msg % {'e': str(e)}
 
         self.prompt.render_failure_message(msg)
         return CODE_PULP_SERVER_EXCEPTION
@@ -229,8 +229,7 @@ class ExceptionHandler:
         self._log_client_exception(e)
 
         msg = _('An error occurred attempting to contact the server. More information '
-                'can be found in the client log file %(l)s.')
-        msg = msg % {'l' : self._log_filename()}
+                'may be found using the -v flag.')
 
         self.prompt.render_failure_message(msg)
         return CODE_CONNECTION_EXCEPTION
@@ -242,7 +241,7 @@ class ExceptionHandler:
         :return: appropriate exit code for this error
         """
 
-        self._log_client_exception(e)
+        _logger.error(e)
 
         msg = _('The specified user does not have permission to execute '
                 'the given command')
@@ -280,8 +279,8 @@ class ExceptionHandler:
                 'client configuration file.')
 
         data = {
-            'expected' : e.expectedHost,
-            'actual' : e.actualHost,
+            'expected': e.expectedHost,
+            'actual': e.actualHost,
         }
 
         msg = msg % data
@@ -301,7 +300,7 @@ class ExceptionHandler:
 
         msg = _('Unable to find host [%(server)s]. Check the client '
                 'configuration to ensure the server hostname is correct.')
-        data = {'server' : self.config['server']['host']}
+        data = {'server': self.config['server']['host']}
         msg = msg % data
 
         self.prompt.render_failure_message(msg)
@@ -321,32 +320,33 @@ class ExceptionHandler:
         # specifically and be generic about everything else.
 
         if len(e.args) > 0 and e[0] == 111:
-            msg = _('The connection was refused when attempting to contact the server [%(server)s]. '
-                    'Check the client configuration to ensure the server hostname is correct.')
-            data = {'server' : self.config['server']['host']}
+            msg = _(
+                'The connection was refused when attempting to contact the server [%(server)s]. '
+                'Check the client configuration to ensure the server hostname is correct.')
+            data = {'server': self.config['server']['host']}
             msg = msg % data
         else:
             msg = _('An error occurred attempting to contact the server. More information '
-                    'can be found in the client log file %(l)s.')
-            msg = msg % {'l' : self._log_filename()}
+                    'may be found using the -v flag.')
 
         self.prompt.render_failure_message(msg)
         return CODE_SOCKET_ERROR
 
-    def handle_client_ssl(self, e):
+    def handle_expired_client_cert(self, e):
         """
-        Handles an exception that originates in the client-side library attempting to establish
-        an SSL connection.
+        Handles the Exception raised when the client certificate has expired.
 
-        :type e: ClientSSLException
-        :return: appropriate error code for this error
+        :param e: The Exception that needs to be handled
+        :type  e: pulp.bindings.exceptions.ClientCertificateExpiredException
+        :return:  appropriate error code for this error
+        :rtype:   int
         """
         msg = _('Session Expired')
         expiration_date = self._certificate_expiration_date(e.cert_filename)
 
         if expiration_date is not None:
             desc = _('The session certificate expired on %(e)s.')
-            desc = desc % {'e' : expiration_date}
+            desc = desc % {'e': expiration_date}
         else:
             desc = _('The session certificate is expired.')
 
@@ -354,6 +354,45 @@ class ExceptionHandler:
         self.prompt.render_paragraph(desc)
 
         return CODE_PERMISSIONS_EXCEPTION
+
+    def handle_ssl_validation_error(self, e):
+        """
+        Handles the Exception raised when the server's certificate is not signed by a trusted
+        authority.
+
+        :param e: The Exception that was raised
+        :type  e: pulp.bindings.exceptions.CertificateVerificationException
+        :return:  appropriate error code for this error
+        :rtype:   int
+        """
+        msg = _("WARNING: The server's SSL certificate is untrusted!")
+        desc = _("The server's SSL certificate was not signed by a trusted authority. This could "
+                 "be due to a man-in-the-middle attack, or it could be that the Pulp server needs "
+                 "to have its certificate signed by a trusted authority. If you are willing to "
+                 "accept the associated risks, you can set verify_ssl to False in the client "
+                 "config's [server] section to disable this check.")
+
+        self.prompt.render_failure_message(msg)
+        self.prompt.render_paragraph(desc)
+
+        return CODE_APACHE_SERVER_EXCEPTION
+
+    def handle_missing_ca_path_exception(self, e):
+        """
+        This is the handler for the generic MissingCAPathException. It uses str(e) as the ca_path
+        that was missing and returns os.EX_IOERR.
+
+        :param e: The Exception that was raised
+        :type  e: pulp.bindings.exceptions.MissingCAPathException
+        :return:  os.EX_IOERR
+        :rtype:   int
+        """
+        msg = _('The given CA path %(ca_path)s is not an accessible file or '
+                'directory. Please ensure that ca_path exists and that your user has '
+                'permission to read it.')
+        msg = msg % {'ca_path': str(e)}
+        self.prompt.render_failure_message(msg)
+        return os.EX_IOERR
 
     def handle_apache_error(self, e):
         """
@@ -366,11 +405,11 @@ class ExceptionHandler:
 
         self._log_client_exception(e)
 
-        msg = _('The web server reported an error trying to access the '
-                'Pulp application. The likely cause is that the pulp-manage-db '
-                'script has not been run prior to starting the server. '
-                'More information can be found in Apache\'s error log file '
-                'on the server itself.')
+        msg = _('There was an internal server error while trying to '
+                'access the Pulp application. One possible cause is that '
+                'the database needs to be migrated to the latest version. If '
+                'this is the case, run pulp-manage-db and restart the services.'
+                ' More information may be found in Apache\'s log.')
 
         self.prompt.render_failure_message(msg)
         return CODE_APACHE_SERVER_EXCEPTION
@@ -386,8 +425,7 @@ class ExceptionHandler:
         self._log_client_exception(e)
 
         msg = _('An unexpected error has occurred. More information '
-                'can be found in the client log file %(l)s.')
-        msg = msg % {'l' : self._log_filename()}
+                'may be found using the -v flag.')
 
         self.prompt.render_failure_message(msg)
         return CODE_UNEXPECTED
@@ -408,14 +446,14 @@ class ExceptionHandler:
         data:      %(d)s
         """
 
-        data = {'h' : e.href,
-                'm' : e.http_request_method,
-                's' : e.http_status,
-                'e' : e.error_message,
-                't' : e.traceback,
-                'd' : e.extra_data}
+        data = {'h': e.href,
+                'm': e.http_request_method,
+                's': e.http_status,
+                'e': e.error_message,
+                't': e.traceback,
+                'd': e.extra_data}
 
-        LOG.error(template % data)
+        _logger.error(template % data)
 
     def _log_client_exception(self, e):
         """
@@ -423,15 +461,7 @@ class ExceptionHandler:
 
         :type e: Exception
         """
-        LOG.exception('Client-side exception occurred')
-
-    def _log_filename(self):
-        """
-        Syntactic sugar for reading the log filename out of the config.
-
-        :return: full path to the log file
-        """
-        return self.config['logging']['filename']
+        _logger.exception('Client-side exception occurred')
 
     def _certificate_expiration_date(self, full_cert_path):
         """

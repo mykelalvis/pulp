@@ -14,19 +14,22 @@ import base64
 import os
 import unittest
 
-import mock
 from paste.fixture import TestApp
+import mock
 import web
 
 from pulp.common.compat import json
 from pulp.server import config
+from pulp.server.async import celery_instance
 from pulp.server.db import connection
 from pulp.server.db.model.auth import User
-from pulp.server.dispatch import constants as dispatch_constants
-from pulp.server.dispatch import factory as dispatch_factory
+from pulp.server.db.model.dispatch import TaskStatus
+from pulp.server.db.model.resources import ReservedResource
+from pulp.server.db.model.workers import Worker
 from pulp.server.logs import start_logging, stop_logging
-from pulp.server.managers.auth.cert.cert_generator import SerialNumber
 from pulp.server.managers import factory as manager_factory
+from pulp.server.managers.auth.cert.cert_generator import SerialNumber
+from pulp.server.managers.auth.role.cud import SUPER_USER_ROLE
 from pulp.server.webservices import http
 from pulp.server.webservices.middleware.exception import ExceptionHandlerMiddleware
 from pulp.server.webservices.middleware.postponed import PostponedOperationMiddleware
@@ -34,17 +37,16 @@ from pulp.server.webservices.middleware.postponed import PostponedOperationMiddl
 
 SerialNumber.PATH = '/tmp/sn.dat'
 
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../data/'))
 
 def load_test_config():
     if not os.path.exists('/tmp/pulp'):
         os.makedirs('/tmp/pulp')
 
-    override_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), '../data', 'test-override-pulp.conf')
-    override_repo_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), '../data', 'test-override-repoauth.conf')
+    override_file = os.path.join(DATA_DIR, 'test-override-pulp.conf')
     stop_logging()
     try:
         config.add_config_file(override_file)
-        config.add_config_file(override_repo_file)
     except RuntimeError:
         pass
     start_logging()
@@ -65,6 +67,8 @@ class PulpServerTests(unittest.TestCase):
         PulpServerTests.CONFIG = load_test_config()
         connection.initialize()
         manager_factory.initialize()
+        # This will make Celery tasks run synchronously
+        celery_instance.celery.conf.CELERY_ALWAYS_EAGER = True
 
     def setUp(self):
         super(PulpServerTests, self).setUp()
@@ -92,22 +96,7 @@ class PulpServerTests(unittest.TestCase):
                 setattr(parent, mocked_attr, original_attr)
 
 
-class PulpAsyncServerTests(PulpServerTests):
-    """
-    Intermediate test suite that starts and stops the asynchronous dispatch
-    system, but doesn't setup the webservices.
-    """
-
-    def setUp(self):
-        super(PulpAsyncServerTests, self).setUp()
-        dispatch_factory.initialize()
-
-    def tearDown(self):
-        super(PulpAsyncServerTests, self).tearDown()
-        dispatch_factory.finalize(clear_queued_calls=True)
-
-
-class PulpWebserviceTests(PulpAsyncServerTests):
+class PulpWebserviceTests(PulpServerTests):
     """
     Base unit test class for all webservice controller tests.
     """
@@ -118,7 +107,7 @@ class PulpWebserviceTests(PulpAsyncServerTests):
 
     @classmethod
     def setUpClass(cls):
-        PulpServerTests.setUpClass()
+        super(PulpWebserviceTests, cls).setUpClass()
 
         # The application setup is somewhat time consuming and really only needs
         # to be done once. We might be able to move it out to a single call for
@@ -153,7 +142,6 @@ class PulpWebserviceTests(PulpAsyncServerTests):
 
     def setUp(self):
         super(PulpWebserviceTests, self).setUp()
-        self.coordinator = dispatch_factory.coordinator()
         self.success_failure = None
         self.result = None
         self.exception = None
@@ -163,12 +151,13 @@ class PulpWebserviceTests(PulpAsyncServerTests):
         # test runs, so we can't just create the user in the class level setup.
         user_manager = manager_factory.user_manager()
         roles = []
-        roles.append(manager_factory.role_manager().super_user_role)
+        roles.append(SUPER_USER_ROLE)
         user_manager.create_user(login='ws-user', password='ws-user', roles=roles)
 
     def tearDown(self):
         super(PulpWebserviceTests, self).tearDown()
-        User.get_collection().remove()
+        User.get_collection().remove(safe=True)
+        TaskStatus.objects().delete()
 
     def get(self, uri, params=None, additional_headers=None):
         return self._do_request('get', uri, params, additional_headers, serialize_json=False)
@@ -180,7 +169,8 @@ class PulpWebserviceTests(PulpAsyncServerTests):
         return self._do_request('delete', uri, params, additional_headers)
 
     def put(self, uri, params=None, additional_headers=None, serialize_json=True):
-        return self._do_request('put', uri, params, additional_headers, serialize_json=serialize_json)
+        return self._do_request('put', uri, params, additional_headers,
+                                serialize_json=serialize_json)
 
     def _do_request(self, request_type, uri, params, additional_headers, serialize_json=True):
         """
@@ -212,24 +202,6 @@ class PulpWebserviceTests(PulpAsyncServerTests):
             body = None
 
         return status, body
-
-
-class PulpItineraryTests(PulpAsyncServerTests):
-
-    def setUp(self):
-        PulpAsyncServerTests.setUp(self)
-        TaskQueue.install()
-        self.coordinator = dispatch_factory.coordinator()
-
-    def tearDown(self):
-        TaskQueue.uninstall()
-        PulpAsyncServerTests.tearDown(self)
-
-    def run_next(self):
-        TaskQueue.run_next()
-
-    def cancel(self, request_id):
-        self.coordinator.cancel_call(request_id)
 
 
 class RecursiveUnorderedListComparisonMixin(object):
@@ -295,74 +267,8 @@ class RecursiveUnorderedListComparisonMixin(object):
                           [[1, 2], [3]], [[3, 3], [2, 1]])
 
 
-class TaskQueue:
-
-    @classmethod
-    def install(cls):
-        existing = dispatch_factory._task_queue()
-        if existing:
-            existing.stop()
-        queue = cls()
-        dispatch_factory._TASK_QUEUE = queue
-        return queue
-
-    @classmethod
-    def uninstall(cls):
-        pass
-
-    @classmethod
-    def run_next(cls):
-        queue = dispatch_factory._task_queue()
-        if isinstance(queue, cls):
-            queue.__run_next()
-        else:
-            raise Exception, '%s not installed' % cls
-
-    def __init__(self):
-        self.__next = 0
-        self.__queue = []
-
-    def start(self):
-        pass
-
-    def stop(self, *args, **kwargs):
-        pass
-
-    def enqueue(self, task):
-        self.__queue.append(task)
-
-    def cancel(self, task):
-        return task.cancel()
-
-    def __run_next(self):
-        if self.__next < len(self.__queue):
-            task = self.__queue[self.__next]
-            self.__run(task)
-            self.__next += 1
-        else:
-            raise Exception, 'No tasks pending'
-
-    def __run(self, task):
-        finished = \
-            [t.call_request.id for t in self.__queue[:self.__next]
-                if t.call_report.state == dispatch_constants.CALL_FINISHED_STATE]
-        for request_id in task.call_request.dependencies.keys():
-            if request_id not in finished:
-                task.skip()
-                return
-        task.call_report.state = dispatch_constants.CALL_RUNNING_STATE
-        task._run()
-
-    def get(self, task_id):
-        for task in self.__queue:
-            if task.call_report.call_request_id == task_id:
-                return task
-
-    def all_tasks(self):
-        return list(self.__queue)
-
-    def lock(self):
-        pass
-
-    def unlock(self):
-        pass
+class ResourceReservationTests(PulpServerTests):
+    def tearDown(self):
+        Worker.objects().delete()
+        ReservedResource.get_collection().remove()
+        TaskStatus.objects().delete()

@@ -1,22 +1,6 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Contains the manager class for performing queries for repo-unit associations.
 """
-
-import copy
-import logging
 
 import pymongo
 
@@ -24,9 +8,6 @@ from pulp.plugins.types import database as types_db
 from pulp.server.db.model.criteria import UnitAssociationCriteria
 from pulp.server.db.model.repository import RepoContentUnit
 
-# -- constants ----------------------------------------------------------------
-
-_LOG = logging.getLogger(__name__)
 
 # Valid sort strings
 SORT_TYPE_ID = 'type_id'
@@ -42,7 +23,6 @@ SORT_DESCENDING = pymongo.DESCENDING
 
 _VALID_DIRECTIONS = (SORT_ASCENDING, SORT_DESCENDING)
 
-# -- manager ------------------------------------------------------------------
 
 class RepoUnitAssociationQueryManager(object):
 
@@ -79,7 +59,7 @@ class RepoUnitAssociationQueryManager(object):
             unit_type_ids = []
 
             # Get a list of all unit types that have at least one unit associated.
-            cursor = collection.find(spec={'repo_id' : repo_id}, fields=['unit_type_id'])
+            cursor = collection.find(spec={'repo_id': repo_id}, fields=['unit_type_id'])
             for t in cursor.distinct('unit_type_id'):
                 unit_type_ids.append(t)
         else:
@@ -88,7 +68,7 @@ class RepoUnitAssociationQueryManager(object):
         for type_id in unit_type_ids:
 
             spec_doc = {'repo_id': repo_id,
-                        'unit_type_id' : type_id}
+                        'unit_type_id': type_id}
             cursor = collection.find(spec_doc)
 
             for unit_id in cursor.distinct('unit_id'):
@@ -106,11 +86,10 @@ class RepoUnitAssociationQueryManager(object):
                             to perform
         @type  criteria:    pulp.server.db.model.criteria.Criteria
 
-        @return:    list of RepoContentUnits
-        @rtype:     list
+        @return:    cursor of the query results
+        @rtype:     pymongo.cursor.Cursor
         """
         return RepoContentUnit.get_collection().query(criteria)
-
 
     def get_units(self, repo_id, criteria=None, as_generator=False):
         """
@@ -135,7 +114,8 @@ class RepoUnitAssociationQueryManager(object):
         unit_associations_generator = self._unit_associations_cursor(repo_id, criteria)
 
         if criteria.remove_duplicates:
-            unit_associations_generator = self._unit_associations_no_duplicates(criteria, unit_associations_generator)
+            unit_associations_generator = self._unit_associations_no_duplicates(
+                criteria, unit_associations_generator)
 
         if criteria.association_sort and not criteria.unit_filters:
             # If we're ordering by association fields, but not filtering the
@@ -182,7 +162,8 @@ class RepoUnitAssociationQueryManager(object):
         # Use a generator expression here to keep from going back to the types
         # collections once we've returned our limit of results.
         # Be sure to skip cursors that would otherwise return an empty result set.
-        units_cursors = (self._associated_units_by_type_cursor(t, criteria, associations_lookup[t].keys())
+        units_cursors = (self._associated_units_by_type_cursor(t, criteria,
+                                                               associations_lookup[t].keys())
                          for t in association_unit_types if t in associations_lookup)
 
         if not criteria.association_sort:
@@ -198,17 +179,20 @@ class RepoUnitAssociationQueryManager(object):
 
         if criteria.association_sort:
             # Use the ordered associations we created to properly order the results.
-            units_generator = self._association_ordered_units(association_ordered_unit_ids, units_generator)
+            units_generator = self._association_ordered_units(association_ordered_unit_ids,
+                                                              units_generator)
 
             if criteria.unit_filters:
                 # If we're ordering by association fields and filtering the
                 # content units, then skip and limit must be performed manually
                 # and last (skip and limit must always come after sorting).
-                units_generator = self._with_skip_and_limit(units_generator, criteria.skip, criteria.limit)
+                units_generator = self._with_skip_and_limit(units_generator, criteria.skip,
+                                                            criteria.limit)
 
             # The association ordering will generate the same unit for every
             # association it has with the repository, hence "duplicate units".
-            units_generator = self._merged_units_duplicate_units(associations_lookup, units_generator)
+            units_generator = self._merged_units_duplicate_units(associations_lookup,
+                                                                 units_generator)
 
         else:
             # Unit ordering or no ordering only produce unique units, hence
@@ -463,11 +447,11 @@ class RepoUnitAssociationQueryManager(object):
 
             elif skipped_units + cursor.count() > skip:
                 to_skip = skip - skipped_units
-                skipped_units += to_skip # set skipped_units to skip
+                skipped_units += to_skip  # set skipped_units to skip
                 cursor.skip(to_skip)
                 yield cursor
 
-            else: # skipped_units + cursor.count() <= skip
+            else:  # skipped_units + cursor.count() <= skip
                 skipped_units += cursor.count()
 
     @staticmethod
@@ -500,7 +484,7 @@ class RepoUnitAssociationQueryManager(object):
                 cursor.limit(to_limit)
                 yield cursor
 
-            else: # cursor.count() + generated_elements <= limit
+            else:  # cursor.count() + generated_elements <= limit
                 generated_elements += cursor.count()
                 yield cursor
 
@@ -535,7 +519,8 @@ class RepoUnitAssociationQueryManager(object):
         # It is worth noting that the units have already been filtered by type,
         # association filters, and unit filters. In addition, skip and limit
         # may have also been performed, so it's potentially not as bad as it seems.
-        associated_units_by_id = dict(((u['_content_type_id'], u['_id']), u) for u in associated_units)
+        associated_units_by_id = dict(
+            ((u['_content_type_id'], u['_id']), u) for u in associated_units)
 
         for id_tuple in associated_unit_ids:
             # the associated_unit_ids are sorted, but not all of the units may
@@ -591,6 +576,8 @@ class RepoUnitAssociationQueryManager(object):
             # Use the associations_lookup to determine how many times to return
             # the unit in the results.
             for association in associations_lookup[unit['_content_type_id']][unit['_id']]:
+                # We don't want to add the unit to the associations_lookup, as that will consume a
+                # large amount of RAM.
+                association = association.copy()
                 association['metadata'] = unit
                 yield association
-

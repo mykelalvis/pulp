@@ -1,36 +1,24 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2010 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-import logging
-from M2Crypto import X509, EVP, RSA, util
 from threading import RLock
+import logging
 import subprocess
 
-from pulp.server.exceptions import PulpException
-from pulp.server import config
-from pulp.server.util import Singleton
-from pulp.common.util import encode_unicode
+from M2Crypto import X509, EVP, RSA, util
 
-log = logging.getLogger(__name__)
+from pulp.common.util import encode_unicode
+from pulp.server import config
+from pulp.server.exceptions import PulpException
+from pulp.server.util import Singleton
+
+
+_logger = logging.getLogger(__name__)
 
 ADMIN_PREFIX = 'admin:'
 ADMIN_SPLITTER = ':'
 
 
 class CertGenerationManager(object):
-    
     def make_admin_user_cert(self, user):
-        '''
+        """
         Generates a x509 certificate for an admin user.
 
         @param user: identification the certificate will be created for; may not be None
@@ -38,30 +26,34 @@ class CertGenerationManager(object):
 
         @return: tuple of PEM encoded private key and certificate
         @rtype:  (str, str)
-        '''
+        """
         expiration = config.config.getint('security', 'user_cert_expiration')
         return self.make_cert(self.encode_admin_user(user), expiration)
 
-    def make_cert(self, uid, expiration):
+    def make_cert(self, cn, expiration, uid=None):
         """
-        Generate an x509 certificate with the Subject set to the uid passed into this method:
+        Generate an x509 certificate with the Subject set to the cn passed into this method:
         Subject: CN=someconsumer.example.com
 
-        @param uid: ID to be embedded in the certificate
-        @type  uid: string
+        @param cn: ID to be embedded in the certificate
+        @type  cn: string
+
+        @param uid: The optional userid.  In pulp, this is the DB document _id
+            for both users and consumers.
+        @type uid: str
 
         @return: tuple of PEM encoded private key and certificate
         @rtype:  (str, str)
         """
         # Ensure we are dealing with a string and not unicode
         try:
-            uid = str(uid)
+            cn = str(cn)
         except UnicodeEncodeError:
-            uid = encode_unicode(uid)
+            cn = encode_unicode(cn)
 
-        log.debug("make_cert: [%s]" % uid)
+        _logger.debug("make_cert: [%s]" % cn)
 
-        #Make a private key
+        # Make a private key
         # Don't use M2Crypto directly as it leads to segfaults when trying to convert
         # the key to a PEM string.  Instead create the key with openssl and return the PEM string
         # Sorta hacky but necessary.
@@ -71,7 +63,7 @@ class CertGenerationManager(object):
                                   callback=util.no_passphrase_callback)
 
         # Make the Cert Request
-        req, pub_key = _make_cert_request(uid, rsa)
+        req, pub_key = _make_cert_request(cn, rsa, uid=uid)
 
         # Sign it with the Pulp server CA
         # We can't do this in m2crypto either so we have to shell out
@@ -83,9 +75,9 @@ class CertGenerationManager(object):
         serial = sn.next()
 
         cmd = 'openssl x509 -req -sha1 -CA %s -CAkey %s -set_serial %s -days %d' % \
-                (ca_cert, ca_key, serial, expiration)
+              (ca_cert, ca_key, serial, expiration)
         p = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         output = p.communicate(input=req.as_pem())[0]
         p.wait()
         exit_code = p.returncode
@@ -109,7 +101,7 @@ class CertGenerationManager(object):
         ca_cert = config.config.get('security', 'cacert')
         cmd = 'openssl verify -CAfile %s' % ca_cert
         p = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         # Use communicate to pipe the certificate to the verify call
         stdout, stderr = p.communicate(input=cert_pem)
@@ -157,7 +149,7 @@ class CertGenerationManager(object):
 
         @param encoded_string: string representation of the user provided by encode_admin_user
         @type  encoded_string: string
-    
+
         @return: tuple of information describing the admin user; (username, id)
         @rtype:  (string, string)
         '''
@@ -216,8 +208,6 @@ class SerialNumber:
         finally:
             self.__mutex.release()
 
-    
-#----------------------------------------------------------------------------------------------------
 
 def _make_priv_key():
     cmd = 'openssl genrsa 1024'
@@ -232,20 +222,19 @@ def _make_priv_key():
     return pem_str
 
 
-def _make_cert_request(uid, rsa):
+def _make_cert_request(cn, rsa, uid=None):
     pub_key = EVP.PKey()
-    x = X509.Request()
+    request = X509.Request()
     pub_key.assign_rsa(rsa)
-    rsa = None # should not be freed here
-    x.set_pubkey(pub_key)
-    name = x.get_subject()
-    name.CN = "%s" % uid
-    ext2 = X509.new_extension('nsComment',
-        'Pulp Generated Identity Certificate for Consumer: [%s]' % uid)
-    extstack = X509.X509_Extension_Stack()
-    extstack.push(ext2)
-    x.add_extensions(extstack)
-    x.sign(pub_key,'sha1')
-    pk2 = x.get_pubkey()
-    return x, pub_key
-
+    request.set_pubkey(pub_key)
+    subject = request.get_subject()
+    subject.nid['UID'] = 458  # openssl lacks support for userid
+    subject.CN = "%s" % cn
+    if uid:
+        subject.UID = uid
+    ext2 = X509.new_extension('nsComment', 'Pulp Identity Certificate for Consumer: [%s]' % cn)
+    extensions = X509.X509_Extension_Stack()
+    extensions.push(ext2)
+    request.add_extensions(extensions)
+    request.sign(pub_key, 'sha1')
+    return request, pub_key

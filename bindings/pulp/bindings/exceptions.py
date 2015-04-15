@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Defines exception classes to handle server connection and request exceptions
 """
@@ -38,31 +25,37 @@ class RequestException(Exception):
         self.extra_data = response_body
 
     def __str__(self):
-        message_data = {'m' : self.http_request_method,
-                        'h' : self.href,
-                        's' : self.http_status,
-                        'g' : self.error_message}
-        return _('RequestException: %(m)s request on %(h)s failed with %(s)s - %(g)s' % message_data)
-            
+        message_data = {'m': self.http_request_method,
+                        'h': self.href,
+                        's': self.http_status,
+                        'g': self.error_message}
+        return _(
+            'RequestException: %(m)s request on %(h)s failed with %(s)s - %(g)s' % message_data)
+
 
 # Response code = 400
-class BadRequestException(RequestException): pass
+class BadRequestException(RequestException):
+    pass
 
 
 # Response code = 401
-class PermissionsException(RequestException): pass
+class PermissionsException(RequestException):
+    pass
 
 
 # Response code = 404
-class NotFoundException(RequestException): pass
+class NotFoundException(RequestException):
+    pass
 
 
 # Response code = 409
-class ConflictException(RequestException): pass
+class ConflictException(RequestException):
+    pass
 
 
 # Response code >= 500
-class PulpServerException(RequestException): pass
+class PulpServerException(RequestException):
+    pass
 
 
 # Response code >= 500 and not a Pulp formatted error
@@ -90,14 +83,36 @@ class ApacheServerException(Exception):
 
 class ClientSSLException(Exception):
     """
-    Raised in the event the client-side libraries refuse to even attempt an SSL connection
-    to the server. The common use case here is an expired client certificate which the
-    client-side libraries will check before even initiating the request.
+    Raised in the event the client-side libraries refuse to communicate with the server.
     """
+    pass
 
+
+class ClientCertificateExpiredException(ClientSSLException):
+    """
+    Raised when the client certificate has expired. The
+    client-side libraries will check for this before initiating the request.
+    """
     def __init__(self, cert_filename):
         Exception.__init__(self)
         self.cert_filename = cert_filename
+
+
+class CertificateVerificationException(ClientSSLException):
+    """
+    Raised when the client does not trust the authority that signed the server's SSL certificate.
+    This could indicate a man-in-the-middle attack, a self-signed certificate, or a certificate
+    signed by an untrusted certificate authority.
+    """
+    pass
+
+
+class MissingCAPathException(ClientSSLException):
+    """
+    Raised when the bindings are given a ca_path that either doesn't exist or can't be determined to
+    exist due to permissions.
+    """
+    pass
 
 
 class ConnectionException(Exception):

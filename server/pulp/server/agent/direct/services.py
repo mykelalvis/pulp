@@ -1,204 +1,251 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-
-from threading import RLock
-from datetime import datetime as dt
-from datetime import timedelta
-from pulp.common import dateutils
-from pulp.server.config import config
-from pulp.server.dispatch import factory
-from gofer.messaging.broker import Broker
-from gofer.messaging import Topic
-from gofer.messaging.consumer import Consumer
-from gofer.messaging import Queue
-from gofer.rmi.async import ReplyConsumer, Listener
-from gofer.rmi.async import WatchDog, Journal
+from datetime import datetime
+from gettext import gettext as _
 from logging import getLogger
 
+from gofer.messaging import Queue
+from gofer.rmi.async import ReplyConsumer, Listener
 
-log = getLogger(__name__)
+from pulp.common import constants, dateutils
+from pulp.server.agent.auth import Authenticator
+from pulp.server.agent.connector import add_connector, get_url
+from pulp.server.db.model.dispatch import TaskStatus
+from pulp.server.managers import factory as managers
 
 
-class Services:
+_logger = getLogger(__name__)
+
+
+class Services(object):
     """
     Agent services.
-    @cvar CTAG: The RMI correlation.
-    @type CTAG: str
-    @cvar watchdog: Asynchronous RMI watchdog.
-    @type watchdog: L{WatchDog}
-    @cvar reply_handler: Asynchornous RMI reply listener.
-    @type reply_handler: L{ReplyHandler}
-    @cvar heartbeat_listener: Agent heartbeat listener.
-    @type heartbeat_listener: L{HeartbeatListener}
+    :cvar reply_handler: Asynchronous RMI reply listener.
+    :type reply_handler: ReplyHandler
     """
 
-    watchdog = None
     reply_handler = None
-    heartbeat_listener = None
-
-    CTAG = 'pulp.task'
 
     @staticmethod
     def init():
-        url = config.get('messaging', 'url')
-        broker = Broker(url)
-        broker.cacert = config.get('messaging', 'cacert')
-        broker.clientcert = config.get('messaging', 'clientcert')
-        log.info('AMQP broker configured: %s', broker)
+        add_connector()
 
-    @classmethod
-    def start(cls):
-        url = config.get('messaging', 'url')
-        # watchdog
-        journal = Journal('/var/lib/pulp/journal/watchdog')
-        cls.watchdog = WatchDog(url=url, journal=journal)
-        cls.watchdog.start()
-        log.info('AMQP watchdog started')
-        # heartbeat
-        cls.heartbeat_listener = HeartbeatListener(url)
-        cls.heartbeat_listener.start()
-        log.info('AMQP heartbeat listener started')
-        # asynchronous reply
-        cls.reply_handler = ReplyHandler(url)
-        cls.reply_handler.start(cls.watchdog)
-        log.info('AMQP reply handler started')
-
-
-class HeartbeatListener(Consumer):
-    """
-    Agent heartbeat listener.
-    """
-
-    __status = {}
-    __mutex = RLock()
-
-    @classmethod
-    def status(cls, uuids=[]):
+    @staticmethod
+    def start():
         """
-        Get the agent heartbeat status.
-        @param uuids: An (optional) list of uuids to query.
-        @return: A tuple (status,last-heartbeat)
+        Start the agent services.
         """
-        cls.__lock()
-        try:
-            now = dt.now(dateutils.utc_tz())
-            if not uuids:
-                uuids = cls.__status.keys()
-            d = {}
-            for uuid in uuids:
-                last = cls.__status.get(uuid)
-                if last:
-                    status = ( last[1] > now )
-                    heartbeat = last[0].isoformat()
-                    any = last[2]
-                else:
-                    status = False
-                    heartbeat = None
-                    any = {}
-                d[uuid] = (status, heartbeat, any)
-            return d
-        finally:
-            cls.__unlock()
-
-    @classmethod
-    def __lock(cls):
-        cls.__mutex.acquire()
-
-    @classmethod
-    def __unlock(cls):
-        cls.__mutex.release()
-
-    def __init__(self, url):
-        topic = Topic('heartbeat')
-        Consumer.__init__(self, topic, url=url)
-
-    def dispatch(self, envelope):
-        try:
-            self.__update(envelope.heartbeat)
-        except:
-            log.error(envelope, exec_info=True)
-        self.ack()
-
-    def __update(self, body):
-        self.__lock()
-        try:
-            log.debug(body)
-            uuid = body.pop('uuid')
-            next = body.pop('next')
-            last = dt.now(dateutils.utc_tz())
-            next = int(next*1.20)
-            next = last+timedelta(seconds=next)
-            self.__status[uuid] = (last, next, body)
-        finally:
-            self.__unlock()
+        url = get_url()
+        Services.reply_handler = ReplyHandler(url)
+        Services.reply_handler.start()
+        _logger.info(_('AMQP reply handler started'))
 
 
 class ReplyHandler(Listener):
     """
     The async RMI reply handler.
-    @ivar consumer: The reply consumer.
-    @type consumer: L{ReplyConsumer}
+    :cvar REPLY_QUEUE: The agent RMI reply queue.
+    :type REPLY_QUEUE: str
+    :ivar consumer: The reply consumer.
+    :type consumer: ReplyConsumer
     """
 
-    def __init__(self, url):
-        queue = Queue(Services.CTAG)
-        self.consumer = ReplyConsumer(queue, url=url)
+    REPLY_QUEUE = 'pulp.task'
 
-    def start(self, watchdog):
+    @staticmethod
+    def _bind_succeeded(action_id, call_context):
+        """
+        Bind succeeded.
+        Update the bind action.
+        :param action_id: The action ID (basically the task_id).
+        :type action_id: str
+        :param call_context: The information about the bind call that was
+            passed to the agent to be round tripped back here.
+        :type call_context: dict
+        """
+        manager = managers.consumer_bind_manager()
+        consumer_id = call_context['consumer_id']
+        repo_id = call_context['repo_id']
+        distributor_id = call_context['distributor_id']
+        manager.action_succeeded(consumer_id, repo_id, distributor_id, action_id)
+
+    @staticmethod
+    def _unbind_succeeded(call_context):
+        """
+        Update the bind action.
+        :param call_context: The information about the bind call that was
+            passed to the agent to be round tripped back here.
+        :type call_context: dict
+        """
+        manager = managers.consumer_bind_manager()
+        consumer_id = call_context['consumer_id']
+        repo_id = call_context['repo_id']
+        distributor_id = call_context['distributor_id']
+        manager.delete(consumer_id, repo_id, distributor_id, force=True)
+
+    @staticmethod
+    def _bind_failed(action_id, call_context):
+        """
+        The bind failed.
+        Update the bind action.
+        :param action_id: The action ID (basically the task_id).
+        :type action_id: str
+        :param call_context: The information about the bind call that was
+            passed to the agent to be round tripped back here.
+        :type call_context: dict
+        """
+        manager = managers.consumer_bind_manager()
+        consumer_id = call_context['consumer_id']
+        repo_id = call_context['repo_id']
+        distributor_id = call_context['distributor_id']
+        manager.action_failed(consumer_id, repo_id, distributor_id, action_id)
+
+    # added for clarity
+    _unbind_failed = _bind_failed
+
+    def __init__(self, url):
+        """
+        :param url: The broker URL.
+        :type url: str
+        """
+        queue = Queue(ReplyHandler.REPLY_QUEUE)
+        queue.durable = True
+        queue.declare(url)
+        self.consumer = ReplyConsumer(queue, url=url, authenticator=Authenticator())
+
+    def start(self):
         """
         Start the reply handler (thread)
-        @param watchdog: A watchdog object used to synthesize timeouts.
-        @type watchdog: L{gofer.rmi.async.WatchDog}
         """
-        self.consumer.start(self, watchdog=watchdog)
-        log.info('Task reply handler, started.')
+        self.consumer.start(self)
+        _logger.info(_('Task reply handler, started.'))
+
+    def accepted(self, reply):
+        """
+        Notification that an RMI has started executing in the agent.
+        The task status is updated in the pulp DB.
+        :param reply: A status reply object.
+        :type reply: gofer.rmi.async.Accepted
+        """
+        _logger.debug(_('Task RMI (accepted): %(r)s'), {'r': reply})
+        call_context = dict(reply.data)
+        task_id = call_context['task_id']
+        TaskStatus.objects(task_id=task_id, state=constants.CALL_WAITING_STATE).\
+            update_one(set__state=constants.CALL_ACCEPTED_STATE)
+
+    def started(self, reply):
+        """
+        Notification that an RMI has started executing in the agent.
+        The task status is updated in the pulp DB.
+        :param reply: A status reply object.
+        :type reply: gofer.rmi.async.Started
+        """
+        _logger.debug(_('Task RMI (started): %(r)s'), {'r': reply})
+        call_context = dict(reply.data)
+        task_id = call_context['task_id']
+        started = reply.timestamp
+        if not started:
+            now = datetime.now(dateutils.utc_tz())
+            started = dateutils.format_iso8601_datetime(now)
+        TaskStatus.objects(task_id=task_id).update_one(set__start_time=started)
+        TaskStatus.objects(task_id=task_id, state__in=[constants.CALL_WAITING_STATE,
+                                                       constants.CALL_ACCEPTED_STATE]).\
+            update_one(set__state=constants.CALL_RUNNING_STATE)
+
+    def rejected(self, reply):
+        """
+        Notification (reply) indicating an RMI request has been rejected.
+        This information used to update the task status.
+        :param reply: A rejected reply object.
+        :type reply: gofer.rmi.async.Rejected
+        """
+        _logger.warn(_('Task RMI (rejected): %(r)s'), {'r': reply})
+
+        call_context = dict(reply.data)
+        action = call_context.get('action')
+        task_id = call_context['task_id']
+        finished = reply.timestamp
+        if not finished:
+            now = datetime.now(dateutils.utc_tz())
+            finished = dateutils.format_iso8601_datetime(now)
+        TaskStatus.objects(task_id=task_id).update_one(set__finish_time=finished,
+                                                       set__state=constants.CALL_ERROR_STATE)
+
+        if action == 'bind':
+            ReplyHandler._bind_failed(task_id, call_context)
+            return
+        if action == 'unbind':
+            ReplyHandler._unbind_failed(task_id, call_context)
+            return
 
     def succeeded(self, reply):
         """
         Notification (reply) indicating an RMI succeeded.
         This information is relayed to the task coordinator.
-        @param reply: A successful reply object.
-        @type reply: L{gofer.rmi.async.Succeeded}
+        :param reply: A successful reply object.
+        :type reply: gofer.rmi.async.Succeeded
         """
-        log.info('Task RMI (succeeded)\n%s', reply)
-        taskid = reply.any
-        result = reply.retval
-        coordinator = factory.coordinator()
-        coordinator.complete_call_success(taskid, result)
+        _logger.info(_('Task RMI (succeeded): %(r)s'), {'r': reply})
+
+        call_context = dict(reply.data)
+        action = call_context.get('action')
+        task_id = call_context['task_id']
+        result = dict(reply.retval)
+        finished = reply.timestamp
+        if not finished:
+            now = datetime.now(dateutils.utc_tz())
+            finished = dateutils.format_iso8601_datetime(now)
+
+        TaskStatus.objects(task_id=task_id).update_one(set__finish_time=finished,
+                                                       set__state=constants.CALL_FINISHED_STATE,
+                                                       set__result=result)
+        if action == 'bind':
+            if result['succeeded']:
+                ReplyHandler._bind_succeeded(task_id, call_context)
+            else:
+                ReplyHandler._bind_failed(task_id, call_context)
+            return
+        if action == 'unbind':
+            if result['succeeded']:
+                ReplyHandler._unbind_succeeded(call_context)
+            else:
+                ReplyHandler._unbind_failed(task_id, call_context)
+            return
 
     def failed(self, reply):
         """
         Notification (reply) indicating an RMI failed.
-        This information is relayed to the task coordinator.
-        @param reply: A failure reply object.
-        @type reply: L{gofer.rmi.async.Failed}
+        This information used to update the task status.
+        :param reply: A failure reply object.
+        :type reply: gofer.rmi.async.Failed
         """
-        log.info('Task RMI (failed)\n%s', reply)
-        taskid = reply.any
-        exception = reply.exval
+        _logger.info(_('Task RMI (failed): %(r)s'), {'r': reply})
+
+        call_context = dict(reply.data)
+        action = call_context.get('action')
+        task_id = call_context['task_id']
         traceback = reply.xstate['trace']
-        coordinator = factory.coordinator()
-        coordinator.complete_call_failure(taskid, exception, traceback)
+        finished = reply.timestamp
+        if not finished:
+            now = datetime.now(dateutils.utc_tz())
+            finished = dateutils.format_iso8601_datetime(now)
+
+        TaskStatus.objects(task_id=task_id).update_one(set__finish_time=finished,
+                                                       set__state=constants.CALL_ERROR_STATE,
+                                                       set__traceback=traceback)
+
+        if action == 'bind':
+            ReplyHandler._bind_failed(task_id, call_context)
+            return
+        if action == 'unbind':
+            ReplyHandler._unbind_failed(task_id, call_context)
+            return
 
     def progress(self, reply):
         """
         Notification (reply) indicating an RMI has reported status.
         This information is relayed to the task coordinator.
-        @param reply: A progress reply object.
-        @type reply: L{gofer.rmi.async.Progress}
+        :param reply: A progress reply object.
+        :type reply: gofer.rmi.async.Progress
         """
-        log.info('Task RMI (progress)\n%s', reply)
-        taskid = reply.any
-        coordinator = factory.coordinator()
-        coordinator.report_call_progress(taskid, reply.details)
+        call_context = dict(reply.data)
+        task_id = call_context['task_id']
+        TaskStatus.objects(task_id=task_id).update_one(set__progress_report=reply.details)

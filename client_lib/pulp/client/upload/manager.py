@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Layer on top of the upload APIs to perform many of the common client-side tasks
 around uploading a content unit, such as the ability to resume a cancelled
@@ -19,23 +6,22 @@ client-side tracking of upload requests on the server.
 """
 
 import copy
+import errno
 import os
 import pickle
-import sys
 
-from pulp.client.lock import LockFile
+from pulp.common.lock import LockFile
 
-# -- constants ----------------------------------------------------------------
 
-DEFAULT_CHUNKSIZE = 1048576 # 1 MB per upload call
+DEFAULT_CHUNKSIZE = 1048576  # 1 MB per upload call
 
-# -- exceptions ---------------------------------------------------------------
 
 class ManagerUninitializedException(Exception):
     """
     Raised in the event the manager is used before it is initialized.
     """
     pass
+
 
 class MissingUploadRequestException(Exception):
     """
@@ -45,11 +31,13 @@ class MissingUploadRequestException(Exception):
     """
     pass
 
+
 class IncompleteUploadException(Exception):
     """
     Raised when attempting to import an upload that has not completed uploading.
     """
     pass
+
 
 class ConcurrentUploadException(Exception):
     """
@@ -57,7 +45,6 @@ class ConcurrentUploadException(Exception):
     """
     pass
 
-# -- classes ------------------------------------------------------------------
 
 class UploadManager(object):
     """
@@ -66,7 +53,7 @@ class UploadManager(object):
     location used to store upload request status files).
 
     Once instantiated, the initialize() method must be called before performing
-    any operations are performed.
+    any operations.
 
     This class' thread safety admittedly isn't the best. The intention, at least
     initially, is to be used in a CLI where there will only be a single thread
@@ -104,23 +91,37 @@ class UploadManager(object):
 
         # Internal state
         self.tracker_files = {}
-        self.is_initialized = False
+
+    @classmethod
+    def init_with_defaults(cls, context):
+        """
+        TODO: get rid of this when we can refactor __init__ and allow a defauly
+        value for upload_working_dir
+
+        This initializes the class with a default upload working directory. It
+        uses code that had been copy-pasted into all type-specific extensions,
+        which allows them to eliminate that copy-pasted code.
+
+        :param context: a bunch of stuff that the whole CLI passes around
+        :type  context: pulp.client.extensions.core.ClientContext
+
+        :return:    a new UploadManager instance with a default working directory
+        :rtype:     UploadManager
+        """
+        upload_working_dir = os.path.join(context.config['filesystem']['upload_working_dir'],
+                                          'default')
+        upload_working_dir = os.path.expanduser(upload_working_dir)
+        return cls(upload_working_dir, context.server)
 
     def initialize(self):
         """
-        Must be called prior to using the manager. This call prepares the
-        working directory and loads any tracker files it finds. See the
-        class level docs for more information on loading those files in a
-        multiple process environment.
+        TODO: delete this when we have a chance to refactor this class and the
+              extensions that use it
         """
+        pass
 
-        # Create the working directory if it doesn't exist
-        if not os.path.exists(self.upload_working_dir):
-            os.makedirs(self.upload_working_dir)
-
-        self.is_initialized = True
-
-    def initialize_upload(self, filename, repo_id, unit_type_id, unit_key, unit_metadata):
+    def initialize_upload(self, filename, repo_id, unit_type_id, unit_key, unit_metadata,
+                          override_config=None):
         """
         Called at the outset of a new upload request. This call requests the
         server create a new upload request to be able to upload bits to it.
@@ -148,7 +149,9 @@ class UploadManager(object):
 
         @return: upload ID used to identify this upload request in future calls
         """
-        self._verify_initialized()
+        # Create the working directory if it doesn't exist
+        if not os.path.exists(self.upload_working_dir):
+            os.makedirs(self.upload_working_dir)
 
         response = self.bindings.uploads.initialize_upload().response_body
 
@@ -165,6 +168,7 @@ class UploadManager(object):
         tracker_file.unit_type_id = unit_type_id
         tracker_file.unit_key = unit_key
         tracker_file.unit_metadata = unit_metadata
+        tracker_file.override_config = override_config
         tracker_file.source_filename = filename
 
         # Save the tracker file to disk
@@ -213,8 +217,6 @@ class UploadManager(object):
         @raise ConcurrentUploadException: if an upload is already in progress
                for upload_id
         """
-        self._verify_initialized()
-
         tracker_file = self._get_tracker_file_by_id(upload_id)
 
         if tracker_file is None:
@@ -272,8 +274,6 @@ class UploadManager(object):
         @raise IncompleteUploadException: if the tracker file indicates the
                upload has not completed
         """
-        self._verify_initialized()
-
         tracker = self._get_tracker_file_by_id(upload_id)
         if tracker is None:
             raise MissingUploadRequestException()
@@ -281,8 +281,9 @@ class UploadManager(object):
         if tracker.source_filename and not tracker.is_finished_uploading:
             raise IncompleteUploadException()
 
-        response = self.bindings.uploads.import_upload(upload_id, tracker.repo_id,
-                   tracker.unit_type_id, tracker.unit_key, tracker.unit_metadata)
+        response = self.bindings.uploads.import_upload(
+            upload_id, tracker.repo_id, tracker.unit_type_id, tracker.unit_key,
+            tracker.unit_metadata, tracker.override_config)
 
         return response
 
@@ -293,22 +294,28 @@ class UploadManager(object):
         @return: list of UploadTracker instances
         @rtype:  list
         """
-        self._verify_initialized()
-
         # Load all tracker files from the working directory
-        for filename in os.listdir(self.upload_working_dir):
-            full_filename = os.path.join(self.upload_working_dir, filename)
-            # If the upload requests are getting processed at this time,
-            # resulting in the tracker files getting deleted, we want to
-            # ignore the IOError and try to load as many tracker files as we can.
-            try:
-                tracker_file = UploadTracker.load(full_filename)
-                self.tracker_files[tracker_file.upload_id] = tracker_file
-            except IOError:
-                pass
+        try:
+            for filename in os.listdir(self.upload_working_dir):
+                full_filename = os.path.join(self.upload_working_dir, filename)
+                # If the upload requests are getting processed at this time,
+                # resulting in the tracker files getting deleted, we want to
+                # ignore the IOError and try to load as many tracker files as we can.
+                try:
+                    tracker_file = UploadTracker.load(full_filename)
+                    self.tracker_files[tracker_file.upload_id] = tracker_file
+                except (IOError, OSError):
+                    pass
+        except OSError, e:
+            # 1092989: if we get ENOENT (no working dir), assume no uploads are
+            # taking place
+            if e.errno == errno.ENOENT:
+                return []
+            else:
+                raise
 
         cached_trackers = self._all_tracker_files()
-        copies = [copy.copy(t) for t in cached_trackers] # copy for safety
+        copies = [copy.copy(t) for t in cached_trackers]  # copy for safety
         return copies
 
     def get_upload(self, upload_id):
@@ -323,7 +330,7 @@ class UploadManager(object):
         """
         tracker = self._get_tracker_file_by_id(upload_id)
         if tracker:
-            tracker = copy.copy(tracker) # copy for safety
+            tracker = copy.copy(tracker)  # copy for safety
         return tracker
 
     def delete_upload(self, upload_id, force=False):
@@ -342,8 +349,6 @@ class UploadManager(object):
                regardles of the server's response.
         @type  force: bool
         """
-        self._verify_initialized()
-
         tracker = self._get_tracker_file_by_id(upload_id)
         if tracker is None:
             raise MissingUploadRequestException()
@@ -354,17 +359,15 @@ class UploadManager(object):
         # Try to delete the server side upload first. If that fails, the force
         # option can be used to delete the client side tracker anyway.
         try:
-            response = self.bindings.uploads.delete_upload(upload_id)
-        except Exception, e:
+            self.bindings.uploads.delete_upload(upload_id)
+        except Exception:
             # Only raise the server side exception on a force
             if not force:
-                raise e, None, sys.exc_info()[2]
+                raise
 
         # Client Side Clean Up
         self._uncache_tracker_file(tracker)
         tracker.delete()
-
-    # -- tracker utilities ----------------------------------------------------
 
     def _tracker_filename(self, upload_id):
         return os.path.join(self.upload_working_dir, upload_id)
@@ -381,11 +384,6 @@ class UploadManager(object):
     def _all_tracker_files(self):
         return self.tracker_files.values()
 
-    # -- misc utility ---------------------------------------------------------
-
-    def _verify_initialized(self):
-        if not self.is_initialized:
-            raise ManagerUninitializedException()
 
 class UploadTracker(object):
     """
@@ -394,13 +392,13 @@ class UploadTracker(object):
     """
 
     def __init__(self, filename):
-        self.filename = filename # filename of the tracker file itself
+        self.filename = filename  # filename of the tracker file itself
 
         # Upload call information
         self.upload_id = None
-        self.location = None # URL to the upload request on the server
-        self.offset = None # start of next chunk to upload
-        self.source_filename = None # path on disk to the file to upload
+        self.location = None  # URL to the upload request on the server
+        self.offset = None  # start of next chunk to upload
+        self.source_filename = None  # path on disk to the file to upload
 
         # Import call information
         self.repo_id = None

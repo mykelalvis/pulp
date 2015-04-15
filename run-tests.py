@@ -1,18 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
+
 import os
 import subprocess
+import sys
 
 from pulp.devel.test_runner import run_tests
 
@@ -20,16 +11,53 @@ from pulp.devel.test_runner import run_tests
 PROJECT_DIR = os.path.dirname(__file__)
 subprocess.call(['find', PROJECT_DIR, '-name', '*.pyc', '-delete'])
 
+# These paths should all pass PEP-8 checks
+paths_to_check = [
+    'agent',
+    'bindings/pulp/bindings/actions.py',
+    'bindings/pulp/bindings/consumer.py',
+    'bindings/pulp/bindings/exceptions.py',
+    'bindings/pulp/bindings/repo_groups.py',
+    'bindings/pulp/bindings/repository.py',
+    'bindings/pulp/bindings/responses.py',
+    'bindings/pulp/bindings/search.py',
+    'bindings/pulp/bindings/server.py',
+    'bindings/pulp/bindings/tasks.py',
+    'bindings/pulp/bindings/upload.py',
+    'bindings/test/unit/test_consumer.py',
+    'bindings/test/unit/test_repo_groups.py',
+    'bindings/test/unit/test_repository.py',
+    'bindings/test/unit/test_responses.py',
+    'bindings/test/unit/test_search.py',
+    'bindings/test/unit/test_server.py',
+    'bindings/test/unit/test_tasks.py',
+    'bindings/test/unit/test_upload.py',
+    'client_lib/pulp/',
+    'repoauth/',
+    'server/pulp/plugins',
+    'server/pulp/server/agent/',
+    'server/pulp/server/async/',
+    'server/pulp/server/auth/',
+    'server/pulp/server/common/',
+    'server/pulp/server/content/',
+    'server/pulp/server/db/',
+    'server/pulp/server/event/',
+    'server/pulp/server/maintenance/',
+    'server/pulp/server/managers',
+    'server/pulp/server/tasks/',
+    'server/pulp/server/webservices/middleware/',
+    'server/pulp/server/webservices/views/',
+    'server/test/unit/plugins/',
+    'server/test/unit/server/']
+
+os.environ['DJANGO_SETTINGS_MODULE'] = 'pulp.server.webservices.settings'
+
 PACKAGES = [
+    os.path.dirname(__file__),
     'pulp',
-    'pulp_admin_auth',
-    'pulp_admin_consumer',
-    'pulp_consumer',
     'pulp_node',
-    'pulp_repo',
-    'pulp_server_info',
-    'pulp_tasks',
 ]
+
 
 TESTS_ALL_PLATFORMS = [
     'agent/test/unit',
@@ -43,10 +71,14 @@ TESTS_NON_RHEL5 = [
     'client_admin/test/unit',
     'nodes/test/unit',
     'server/test/unit',
+    'repoauth/test',
     'devel/test/unit'
 ]
 
 dir_safe_all_platforms = [os.path.join(os.path.dirname(__file__), x) for x in TESTS_ALL_PLATFORMS]
 dir_safe_non_rhel5 = [os.path.join(os.path.dirname(__file__), x) for x in TESTS_NON_RHEL5]
 
-run_tests(PACKAGES, dir_safe_all_platforms, dir_safe_non_rhel5)
+tests_exit_code = run_tests(PACKAGES, dir_safe_all_platforms, dir_safe_non_rhel5,
+                            flake8_paths=paths_to_check)
+
+sys.exit(tests_exit_code)

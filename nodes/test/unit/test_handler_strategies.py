@@ -13,6 +13,7 @@
 from unittest import TestCase
 from mock import Mock, patch
 
+from base import Task as TestTask, TaskResult as TestReport
 from pulp_node.handlers.strategies import *
 from pulp_node.error import *
 from pulp_node.handlers.model import Repository
@@ -37,12 +38,6 @@ class TestResponse:
     def __init__(self, http_code, body=None):
         self.response_code = http_code
         self.response_body = body
-
-
-class TestTask:
-
-    def __init__(self, task_id):
-        self.task_id = task_id
 
 
 class TestRepo:
@@ -150,7 +145,7 @@ class TestBase(TestCase):
         self.assertEqual(request.summary.errors[0].error_id, RepoSyncRestError.ERROR_ID)
         self.assertEqual(request.summary.errors[0].details['http_code'], 401)
 
-    @patch('pulp_node.handlers.model.Repository.fetch_all', return_value=[TestRepo(123)])
+    @patch('pulp_node.handlers.model.Repository.fetch_all', return_value=[TestRepo('123')])
     @patch('pulp_node.handlers.model.Repository.delete', side_effect=ValueError())
     def test_delete_repositories_exception(self, *unused):
         # Setup
@@ -211,7 +206,7 @@ class TestBase(TestCase):
         self.assertEqual(units.removed, 0)
 
     @patch('pulp.bindings.repository.RepositoryActionsAPI.sync',
-           return_value=TestResponse(202, [TestTask(TASK_ID)]))
+           return_value=TestResponse(202, TestReport(TASK_ID)))
     @patch('pulp.bindings.tasks.TasksAPI.cancel_task',
            return_value=TestResponse(200))
     def test_model_repo_sync_cancelled(self, mock_cancel, *unused):

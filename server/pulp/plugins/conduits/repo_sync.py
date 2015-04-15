@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Contains the definitions for all classes related to the importer's API for
 interacting with the Pulp server during a repo sync.
@@ -43,16 +30,16 @@ from gettext import gettext as _
 import logging
 import sys
 
-from pulp.plugins.conduits.mixins import (\
+from pulp.plugins.conduits.mixins import (
     ImporterConduitException, AddUnitMixin, RepoScratchPadMixin,
     ImporterScratchPadMixin, SingleRepoUnitsMixin, StatusMixin,
     SearchUnitsMixin)
 from pulp.plugins.model import SyncReport
-import pulp.server.managers.factory as manager_factory
 from pulp.server.managers.repo.unit_association import OWNER_TYPE_IMPORTER
+import pulp.server.managers.factory as manager_factory
 
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 class RepoSyncConduit(RepoScratchPadMixin, ImporterScratchPadMixin, AddUnitMixin,
@@ -72,17 +59,19 @@ class RepoSyncConduit(RepoScratchPadMixin, ImporterScratchPadMixin, AddUnitMixin
     def __init__(self, repo_id, importer_id, association_owner_type, association_owner_id):
         RepoScratchPadMixin.__init__(self, repo_id, ImporterConduitException)
         ImporterScratchPadMixin.__init__(self, repo_id, importer_id)
-        AddUnitMixin.__init__(self, repo_id, importer_id, association_owner_type, association_owner_id)
+        AddUnitMixin.__init__(self, repo_id, importer_id, association_owner_type,
+                              association_owner_id)
         SingleRepoUnitsMixin.__init__(self, repo_id, ImporterConduitException)
         StatusMixin.__init__(self, importer_id, ImporterConduitException)
         SearchUnitsMixin.__init__(self, ImporterConduitException)
 
         self._association_manager = manager_factory.repo_unit_association_manager()
+        self._content_query_manager = manager_factory.content_query_manager()
 
         self._removed_count = 0
 
     def __str__(self):
-        return _('RepoSyncConduit for repository [%(r)s]') % {'r' : self.repo_id}
+        return _('RepoSyncConduit for repository [%(r)s]') % {'r': self.repo_id}
 
     def remove_unit(self, unit):
         """
@@ -108,11 +97,27 @@ class RepoSyncConduit(RepoScratchPadMixin, ImporterScratchPadMixin, AddUnitMixin
         """
 
         try:
-            self._association_manager.unassociate_unit_by_id(self.repo_id, unit.type_id, unit.id, OWNER_TYPE_IMPORTER, self.association_owner_id)
+            self._association_manager.unassociate_unit_by_id(
+                self.repo_id, unit.type_id, unit.id, OWNER_TYPE_IMPORTER, self.association_owner_id)
             self._removed_count += 1
         except Exception, e:
-            logger.exception(_('Content unit unassociation failed'))
+            _logger.exception(_('Content unit unassociation failed'))
             raise ImporterConduitException(e), None, sys.exc_info()[2]
+
+    def associate_existing(self, unit_type_id, search_dicts):
+        """
+        Associates existing units with a repo
+
+        :param unit_type_id: unit type id
+        :type  unit_type_id: str
+        :param search_dicts: search dicts for units to associate with repo
+                             (example: list of unit key dicts)
+        :type  search_dicts: list of dicts
+        """
+        unit_ids = self._content_query_manager.get_content_unit_ids(unit_type_id, search_dicts)
+        self._association_manager.associate_all_by_ids(self.repo_id, unit_type_id, unit_ids,
+                                                       self.association_owner_type,
+                                                       self.association_owner_id)
 
     def build_success_report(self, summary, details):
         """
@@ -183,4 +188,3 @@ class RepoSyncConduit(RepoScratchPadMixin, ImporterScratchPadMixin, AddUnitMixin
                        self._removed_count, summary, details)
         r.canceled_flag = True
         return r
-

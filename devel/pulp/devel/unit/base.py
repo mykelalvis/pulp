@@ -20,13 +20,10 @@ import okaara.prompt
 
 from pulp.bindings.bindings import Bindings
 from pulp.bindings.server import  PulpConnection
-
 from pulp.client.extensions.core import ClientContext, PulpPrompt, PulpCli
 from pulp.client.extensions.exceptions import ExceptionHandler
-
 from pulp.common.config import Config
 
-# base unittest class ----------------------------------------------------------
 
 class PulpClientTests(unittest.TestCase):
     """
@@ -54,3 +51,17 @@ class PulpClientTests(unittest.TestCase):
 
         self.cli = PulpCli(self.context)
         self.context.cli = self.cli
+
+
+class PulpCeleryTaskTests(unittest.TestCase):
+    """
+    Base class for tests of webservice controllers.  This base is used to work around the
+    authentication tests for each each method
+    """
+
+    def setUp(self):
+        self.patch1 = mock.patch('pulp.server.db.model.dispatch.TaskStatus')
+        self.patch1.start()
+
+    def tearDown(self):
+        self.patch1.stop()

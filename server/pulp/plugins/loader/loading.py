@@ -1,36 +1,20 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2011-2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
-
+from gettext import gettext as _
 import logging
 import os
 import re
 import sys
-from gettext import gettext as _
 
 import pkg_resources
 
 from pulp.common.compat import json
 
-# constants --------------------------------------------------------------------
 
-_LOG = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 # file types
-
 _CONFIG_REGEX = re.compile('.*\.(config|conf|cfg)$', re.IGNORECASE)
 _INIT_REGEX = re.compile('__init__.py(c|o)?$')
 
-# exceptions -------------------------------------------------------------------
 
 class ConfigParsingException(Exception):
     """
@@ -44,39 +28,6 @@ class ConfigParsingException(Exception):
 
     def __str__(self):
         return 'Invalid configuration file: %s' % self.config_file
-
-# plugin loading methods -------------------------------------------------------
-
-def load_plugins_from_path(path, base_class, plugin_map):
-    """
-    @type path: str
-    @type base_class: type
-    @type plugin_map: L{_PluginMap}
-    """
-    _LOG.debug('Loading multiple plugins: %s, %s' % (path, base_class.__name__))
-
-    if not os.access(path, os.F_OK | os.R_OK):
-        msg = _('Cannot load plugins: path does not exist or cannot be read: %(p)s')
-        _LOG.critical(msg % {'p': path})
-        return
-
-    add_path_to_sys_path(path)
-
-    plugin_dirs = get_plugin_dirs(path)
-
-    for dir_ in plugin_dirs:
-        if dir_ in sys.modules:
-            msg = _('Cannot load plugin: python already has module loaded: %(d)s')
-            _LOG.error(msg % {'d': dir_})
-            continue
-
-        plugin_tuples = load_plugins(dir_, base_class, base_class.__name__.lower())
-
-        if plugin_tuples is None:
-            continue
-
-        for cls, cfg in plugin_tuples:
-            add_plugin_to_map(cls, cfg, plugin_map)
 
 
 def add_plugin_to_map(cls, cfg, plugin_map):
@@ -105,23 +56,9 @@ def load_plugins_from_entry_point(entry_point_group_name, plugin_map):
     @type  plugin_map: pulp.plugins.loader.manager._PluginMap instance
     """
     for entry_point in pkg_resources.iter_entry_points(entry_point_group_name):
+        _logger.debug('Loading %s' % entry_point)
         cls, cfg = entry_point.load()()
         add_plugin_to_map(cls, cfg, plugin_map)
-
-
-def get_plugin_dirs(plugin_root):
-    """
-    @type plugin_root: str
-    @rtype: list [str, ...]
-    """
-    _LOG.debug('Looking for plugin dirs in plugin root: %s' % plugin_root)
-    dirs = []
-    for entry in os.listdir(plugin_root):
-        plugin_dir = os.path.join(plugin_root, entry)
-        if not os.path.isdir(plugin_dir):
-            continue
-        dirs.append(plugin_dir)
-    return dirs
 
 
 def load_plugins(path, base_class, module_name):
@@ -131,7 +68,7 @@ def load_plugins(path, base_class, module_name):
     @type module_name: str
     @rtype: list of tuple (type, dict)
     """
-    _LOG.debug('Loading plugin: %s, %s, %s' % (path, base_class.__name__, module_name))
+    _logger.debug('Loading plugin: %s, %s, %s' % (path, base_class.__name__, module_name))
 
     config_path = None
     init_found = False
@@ -150,12 +87,12 @@ def load_plugins(path, base_class, module_name):
 
     if not init_found:
         msg = _('Cannot load plugin: %(n)s is not a package: no __init__.py found')
-        _LOG.error(msg % {'n': package_name})
+        _logger.error(msg % {'n': package_name})
         return None
 
     if not module_found:
         msg = _('Cannot load plugin: %(n)s has no module: %(p)s.%(m)s')
-        _LOG.info(msg % {'n': module_name.title(), 'p': package_name, 'm': module_name})
+        _logger.info(msg % {'n': module_name.title(), 'p': package_name, 'm': module_name})
         return None
 
     # load and return the plugin class and configuration
@@ -174,7 +111,7 @@ def load_plugin_classes(module_name, base_class):
     @type base_class: type
     @rtype: list of attr
     """
-    _LOG.debug('Loading plugin class: %s, %s' % (module_name, base_class.__name__))
+    _logger.debug('Loading plugin class: %s, %s' % (module_name, base_class.__name__))
 
     module = import_module(module_name)
     attr_list = []
@@ -198,7 +135,7 @@ def load_plugin_classes(module_name, base_class):
 
     if len(attr_list) is 0:
         msg = _('Cannot load plugin: %(m)s modules did not contain a derived class of %(c)s')
-        _LOG.error(msg % {'m': module_name, 'c': base_class.__name__})
+        _logger.error(msg % {'m': module_name, 'c': base_class.__name__})
 
     return attr_list
 
@@ -208,7 +145,7 @@ def load_plugin_config(config_file_name):
     @type config_file_name: str
     @rtype: dict
     """
-    _LOG.info('Loading config file: %s' % config_file_name)
+    _logger.info('Loading config file: %s' % config_file_name)
 
     try:
         contents = read_content(config_file_name)
@@ -216,7 +153,7 @@ def load_plugin_config(config_file_name):
         return cfg
     except ValueError:
         # ValueError is raised if the config file isn't valid JSON
-        _LOG.error('Error parsing config file: %s' % config_file_name)
+        _logger.error('Error parsing config file: %s' % config_file_name)
         raise ConfigParsingException(config_file_name)
 
 
@@ -225,7 +162,7 @@ def import_module(name):
     @type name: str
     @rtype: module
     """
-    _LOG.debug('Importing plugin module: %s' % name)
+    _logger.debug('Importing plugin module: %s' % name)
     if name in sys.modules:
         sys.modules.pop(name)
     mod = __import__(name)
@@ -239,11 +176,11 @@ def get_plugin_types(plugin_class):
     @type plugin_class: type
     @rtype: list [str, ...]
     """
-    _LOG.debug('Getting types for plugin class: %s' % plugin_class.__name__)
+    _logger.debug('Getting types for plugin class: %s' % plugin_class.__name__)
     types = get_plugin_metadata_field(plugin_class, 'types')
     if types is None:
-        msg =  _('Cannot load plugin: %(p)s does not define any types')
-        _LOG.error(msg % {'p': plugin_class.__name__})
+        msg = _('Cannot load plugin: %(p)s does not define any types')
+        _logger.error(msg % {'p': plugin_class.__name__})
         return None
     if isinstance(types, basestring):
         types = [types]
@@ -259,18 +196,17 @@ def get_plugin_metadata_field(plugin_class, field, default=None):
     metadata = plugin_class.metadata()
     if not isinstance(metadata, dict):
         msg = _('Cannot load plugin: %(p)s.metadata() did not return a dictionary')
-        _LOG.error(msg % {'p': plugin_class.__name__})
+        _logger.error(msg % {'p': plugin_class.__name__})
         return None
     value = metadata.get(field, default)
     return value
 
-# general utility methods ------------------------------------------------------
 
 def add_path_to_sys_path(path):
     """
     @type path: str
     """
-    _LOG.debug('Adding path to sys.path: %s' % path)
+    _logger.debug('Adding path to sys.path: %s' % path)
     if path in sys.path:
         return
     sys.path.append(path)
@@ -285,4 +221,3 @@ def read_content(file_name):
     contents = handle.read()
     handle.close()
     return contents
-

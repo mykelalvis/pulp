@@ -79,3 +79,64 @@ class OrphanContentAPI(PulpAPI):
         """
         path = self.PATH + "%s/" % type_id
         return self.server.DELETE(path)
+
+
+class ContentSourceAPI(PulpAPI):
+
+    BASE_URL = 'v2/content/sources/'
+
+    def get(self, source_id):
+        """
+        Get a content source by ID.
+        :param source_id: A content source ID.
+        :type source_id: str
+        :return: The response. The *body* is a content source object.
+        :rtype: pulp.bindings.responses.Response
+        """
+        path = '%s%s/' % (self.BASE_URL, source_id)
+        return self.server.GET(path)
+
+    def get_all(self):
+        """
+        Get all loaded content sources.
+        :return: The response. The *body* is a list of content source objects.
+        :rtype: pulp.bindings.responses.Response
+        """
+        path = self.BASE_URL
+        return self.server.GET(path)
+
+    def refresh(self, source_id):
+        """
+        Refresh a content source with id source_id
+        :param source_id: A content source ID.
+        :type source_id: str
+        :return: The response. The *body* lists a task id spawned to perform the refresh.
+        :rtype: pulp.bindings.responses.Response
+        """
+        path = "%s%s/action/refresh/" % (self.BASE_URL, source_id)
+        return self.server.POST(path)
+
+    def refresh_all(self):
+        """
+        Refresh all content sources
+        :return: The response. The *body* lists a task id spawned to perform the refresh.
+        :rtype: pulp.bindings.responses.Response
+        """
+        path = "%saction/refresh/" % self.BASE_URL
+        return self.server.POST(path)
+
+
+class ContentCatalogAPI(PulpAPI):
+
+    BASE_URL = 'v2/content/catalog/'
+
+    def delete(self, source_id):
+        """
+        Delete catalog entries by source ID.
+        :param source_id: A content source ID.
+        :type source_id: str
+        :return: The response.
+        :rtype: pulp.bindings.responses.Response
+        """
+        path = '%s%s/' % (self.BASE_URL, source_id)
+        return self.server.DELETE(path)

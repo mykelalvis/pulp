@@ -1,40 +1,43 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Contains functionality common across all repository-related managers.
 
 = Working Directories =
-Working directories are as staging or temporary file storage by importers
-and distributors. Each directory is unique to the repository and plugin
-combination.
+Working directories are used as staging or temporary file storage by importers and distributors.
+Now that this work is performed inside of celery tasks, each celery worker gets a working
+directory. Each task executed by a worker is able to get a working directory inside the workers
+root working directory.
 
-The directory structure for plugin working directories is as follows:
-<pulp_storage>/working/<repo_id>/[importers|distributors]/<plugin_type_id>
-
-For example, for importer "foo" and repository "bar":
-/var/lib/pulp/working/bar/importers/foo
-
-The rationale is to simplify cleanup on repository delete; the repository's
-working directory is simply deleted.
+The root of the working directories is specified with 'working_directory' setting in
+/etc/pulp/server.conf.  The default value is /var/cache/pulp
 """
 
 import os
+import shutil
 
+from celery import task
+
+from pulp.common import dateutils, error_codes
+from pulp.plugins.model import Repository, RelatedRepository, RepositoryGroup, \
+    RelatedRepositoryGroup
 from pulp.server import config as pulp_config
-from pulp.plugins.model import Repository, RelatedRepository, RepositoryGroup, RelatedRepositoryGroup
+from pulp.server.exceptions import PulpCodedException
 
-# -- single repo calls --------------------------------------------------------
+
+def _ensure_tz_specified(time_stamp):
+    """
+    Check a datetime that came from the database to ensure it has a timezone specified in UTC
+    Mongo doesn't include the TZ info so if no TZ is set this assumes UTC.
+
+    :param time_stamp: a datetime object to ensure has UTC tzinfo specified
+    :type time_stamp: datetime.datetime
+    :return: The time_stamp with a timezone specified
+    :rtype: datetime.datetime
+    """
+    if time_stamp:
+        time_stamp = dateutils.to_utc_datetime(time_stamp, no_tz_equals_local_tz=False)
+
+    return time_stamp
+
 
 def to_transfer_repo(repo_data):
     """
@@ -49,8 +52,11 @@ def to_transfer_repo(repo_data):
     @rtype:  pulp.plugins.model.Repository}
     """
     r = Repository(repo_data['id'], repo_data['display_name'], repo_data['description'],
-                   repo_data['notes'], content_unit_counts=repo_data['content_unit_counts'])
+                   repo_data['notes'], content_unit_counts=repo_data['content_unit_counts'],
+                   last_unit_added=_ensure_tz_specified(repo_data.get('last_unit_added')),
+                   last_unit_removed=_ensure_tz_specified(repo_data.get('last_unit_removed')))
     return r
+
 
 def to_related_repo(repo_data, configs):
     """
@@ -67,83 +73,10 @@ def to_related_repo(repo_data, configs):
     @return: transfer object used in many plugin API calls
     @rtype:  pulp.plugins.model.RelatedRepository
     """
-    r = RelatedRepository(repo_data['id'], configs, repo_data['display_name'], repo_data['description'], repo_data['notes'])
+    r = RelatedRepository(repo_data['id'], configs, repo_data['display_name'],
+                          repo_data['description'], repo_data['notes'])
     return r
 
-def repository_working_dir(repo_id, mkdir=True):
-    """
-    Determines the repository's working directory. Individual plugin working
-    directories will be placed under this. If the mkdir argument is set to true,
-    the directory will be created as part of this call.
-
-    See the module-level docstrings for more information on the directory
-    structure.
-
-    @param mkdir: if true, this call will create the directory; otherwise the
-                  full path will just be generated
-    @type  mkdir: bool
-
-    @return: full path on disk
-    @rtype:  str
-    """
-    working_dir = os.path.join(_repo_working_dir(), repo_id)
-
-    if mkdir and not os.path.exists(working_dir):
-        os.makedirs(working_dir)
-
-    return working_dir
-
-def importer_working_dir(importer_type_id, repo_id, mkdir=True):
-    """
-    Determines the working directory for an importer to use for a repository.
-    If the mkdir argument is set to true, the directory will be created as
-    part of this call.
-
-    See the module-level docstrings for more information on the directory
-    structure.
-
-    @param mkdir: if true, this call will create the directory; otherwise the
-                  full path will just be generated
-    @type  mkdir: bool
-
-    @return: full path on disk to the directory the importer can use for the
-             given repository
-    @rtype:  str
-    """
-    repo_working_dir = repository_working_dir(repo_id, mkdir)
-    working_dir = os.path.join(repo_working_dir, 'importers', importer_type_id)
-
-    if mkdir and not os.path.exists(working_dir):
-        os.makedirs(working_dir)
-
-    return working_dir
-
-def distributor_working_dir(distributor_type_id, repo_id, mkdir=True):
-    """
-    Determines the working directory for a distributor to use for a repository.
-    If the mkdir argument is set to true, the directory will be created as
-    part of this call.
-
-    See the module-level docstrings for more information on the directory
-    structure.
-
-    @param mkdir: if true, this call will create the directory; otherwise the
-                  full path will just be generated
-    @type  mkdir: bool
-
-    @return: full path on disk to the directory the distributor can use for the
-             given repository
-    @rtype:  str
-    """
-    repo_working_dir = repository_working_dir(repo_id, mkdir)
-    working_dir = os.path.join(repo_working_dir, 'distributors', distributor_type_id)
-
-    if mkdir and not os.path.exists(working_dir):
-        os.makedirs(working_dir)
-
-    return working_dir
-
-# -- repository group calls ---------------------------------------------------
 
 def to_transfer_repo_group(group_data):
     """
@@ -160,6 +93,7 @@ def to_transfer_repo_group(group_data):
                         group_data['description'], group_data['notes'],
                         group_data['repo_ids'])
     return g
+
 
 def to_related_repo_group(group_data, configs):
     """
@@ -180,81 +114,99 @@ def to_related_repo_group(group_data, configs):
                                group_data['description'], group_data['notes'])
     return g
 
-def repo_group_working_dir(group_id, mkdir=True):
+
+def _working_dir_root(worker_name):
     """
-    Determines the repo group's working directory. Individual plugin working
-    directories will be placed under this. If the mkdir argument is set to
-    true, the directory will be created as part of this call.
+    Returns the path to the working directory of a worker
 
-    @param group_id: identifies the repo group
-    @type  group_id: str
-
-    @param mkdir: if true, the call will create the directory; otherwise the
-                  full path will just be generated and returned
-    @type  mkdir: bool
-
-    @return: full path on disk
-    @rtype:  str
+    :param worker_name:     Name of worker for which path is requested
+    :type  name:            basestring
+    :return working_directory setting from server config
+    :rtype  str
     """
-    working_dir = os.path.join(_repo_group_working_dir(), group_id)
-
-    if mkdir and not os.path.exists(working_dir):
-        os.makedirs(working_dir)
-
-    return working_dir
-
-def group_importer_working_dir(importer_type_id, group_id, mkdir=True):
-    """
-    Determines the working directory for an importer to use for a repository
-    group. If the mkdir argument is set to true, the directory will be created
-    as part of this call.
-
-    @param mkdir: if true, the call will create the directory; otherwise the
-                  full path will just be generated and returned
-    @type  mkdir: bool
-
-    @return: full path on disk
-    @rtype:  str
-    """
-    group_working_dir = repo_group_working_dir(group_id, mkdir)
-    working_dir = os.path.join(group_working_dir, 'importers', importer_type_id)
-
-    if mkdir and not os.path.exists(working_dir):
-        os.makedirs(working_dir)
-
-    return working_dir
-
-def group_distributor_working_dir(distributor_type_id, group_id, mkdir=True):
-    """
-    Determines the working directory for an importer to use for a repository
-    group. If the mkdir argument is set to true, the directory will be created
-    as part of this call.
-
-    @param mkdir: if true, the call will create the directory; otherwise the
-                  full path will just be generated and returned
-    @type  mkdir: bool
-
-    @return: full path on disk
-    @rtype:  str
-    """
-    group_working_dir = repo_group_working_dir(group_id, mkdir)
-    working_dir = os.path.join(group_working_dir, 'distributors', distributor_type_id)
-
-    if mkdir and not os.path.exists(working_dir):
-        os.makedirs(working_dir)
-
-    return working_dir
-
-
-def _working_dir_root():
-    storage_dir = pulp_config.config.get('server', 'storage_dir')
-    dir_root = os.path.join(storage_dir, 'working')
+    working_dir = pulp_config.config.get('server', 'working_directory')
+    dir_root = os.path.join(working_dir, worker_name)
     return dir_root
 
-def _repo_working_dir():
-    dir = os.path.join(_working_dir_root(), 'repos')
-    return dir
 
-def _repo_group_working_dir():
-    dir = os.path.join(_working_dir_root(), 'repo_groups')
-    return dir
+def create_worker_working_directory(worker_name):
+    """
+    Creates a working directory inside the working_directory as specified in /etc/pulp/server.conf
+    default path for working_directory is /var/cache/pulp
+
+    :param worker_name:     Name of worker that uses the working directory created
+    :type  name:            basestring
+    :return Path to the working directory for a worker
+    :rtype  str
+    """
+    working_dir_root = _working_dir_root(worker_name)
+    os.mkdir(working_dir_root)
+
+
+def delete_worker_working_directory(worker_name):
+    """
+    Deletes a working directory inside the working_directory as specified in /etc/pulp/server.conf
+    default path for working_directory is /var/cache/pulp
+
+    :param worker_name:     Name of worker that uses the working directory being deleted
+    :type  name:            basestring
+    """
+    working_dir_root = _working_dir_root(worker_name)
+    if os.path.exists(working_dir_root):
+        shutil.rmtree(working_dir_root)
+
+
+def _working_directory_path():
+    """
+    Gets the path for a task's working directory inside a workers working directory
+
+    @return: full path on disk to the working directory for current task
+    @rtype:  str
+    """
+    current_task = task.current
+    if (current_task and current_task.request and current_task.request.id and
+            current_task.request.hostname):
+        worker_name = current_task.request.hostname
+        task_id = current_task.request.id
+        worker_dir_root = _working_dir_root(worker_name)
+        working_dir_root = os.path.join(worker_dir_root, task_id)
+    else:
+        return None
+
+    return working_dir_root
+
+
+def get_working_directory():
+    """
+    Creates a working directory with task id as name. This directory resides inside a particular
+    worker's working directory. The 'working_directory' setting in [server] section of
+    /etc/pulp/server.conf defines the local path to the root of working directories. The directory
+    is created only once per task. The path to the existing working directory is returned for all
+    subsequent calls for that task.
+
+    @return: full path on disk to the working directory for current task
+    @rtype:  str
+    """
+    working_dir_root = _working_directory_path()
+
+    if working_dir_root:
+        if os.path.exists(working_dir_root):
+            return working_dir_root
+        os.mkdir(working_dir_root)
+        return working_dir_root
+    else:
+        # If path is None, this method is called outside of an asynchronous task
+        raise PulpCodedException(error_codes.PLP0033)
+
+
+def delete_working_directory():
+    """
+    Deletes working directory for a particular task.
+
+    @return: None
+    @rtype:  None
+    """
+    working_dir_root = _working_directory_path()
+
+    if working_dir_root and os.path.exists(working_dir_root):
+        shutil.rmtree(working_dir_root)

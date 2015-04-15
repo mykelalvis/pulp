@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Contains content applicability management classes
 """
@@ -18,28 +5,33 @@ Contains content applicability management classes
 from gettext import gettext as _
 from logging import getLogger
 
+from celery import task
+
 from pulp.plugins.conduits.profiler import ProfilerConduit
 from pulp.plugins.config import PluginCallConfiguration
 from pulp.plugins.loader import api as plugin_api, exceptions as plugin_exceptions
 from pulp.plugins.profiler import Profiler
+from pulp.server.async.tasks import Task
 from pulp.server.db.model.consumer import Bind, RepoProfileApplicability, UnitProfile
 from pulp.server.db.model.criteria import Criteria
 from pulp.server.db.model.repository import Repo
 from pulp.server.managers import factory as managers
 from pulp.server.managers.consumer.query import ConsumerQueryManager
 
-_LOG = getLogger(__name__)
+
+_logger = getLogger(__name__)
 
 
 class ApplicabilityRegenerationManager(object):
-
-    def regenerate_applicability_for_consumers(self, consumer_criteria):
+    @staticmethod
+    def regenerate_applicability_for_consumers(consumer_criteria):
         """
         Regenerate and save applicability data for given updated consumers.
 
         :param consumer_criteria: The consumer selection criteria
-        :type consumer_criteria: pulp.server.db.model.criteria.Criteria
+        :type consumer_criteria: dict
         """
+        consumer_criteria = Criteria.from_dict(consumer_criteria)
         consumer_query_manager = managers.consumer_query_manager()
         bind_manager = managers.consumer_bind_manager()
         consumer_profile_manager = managers.consumer_profile_manager()
@@ -50,16 +42,17 @@ class ApplicabilityRegenerationManager(object):
 
         # Following logic of checking existing applicability and getting required data
         # to generate applicability is a bit more complicated than what it could be 'by design'.
-        # It is to optimize the number of db queries and improving applicability generation 
-        # performance. Please consider the implications for applicability generation time 
+        # It is to optimize the number of db queries and improving applicability generation
+        # performance. Please consider the implications for applicability generation time
         # when making any modifications to this code.
 
         # Get all unit profiles associated with given consumers
-        unit_profile_criteria = Criteria(filters={'consumer_id':{'$in':consumer_ids}},
-                                         fields=['consumer_id','profile_hash','content_type','id'])
+        unit_profile_criteria = Criteria(
+            filters={'consumer_id': {'$in': consumer_ids}},
+            fields=['consumer_id', 'profile_hash', 'content_type', 'id'])
         all_unit_profiles = consumer_profile_manager.find_by_criteria(unit_profile_criteria)
 
-        # Create a consumer-profile map with consumer id as the key and list of tuples 
+        # Create a consumer-profile map with consumer id as the key and list of tuples
         # with profile details as the value
         consumer_unit_profiles_map = {}
         # Also create a map of profile_id keyed by profile_hash for profile lookup.
@@ -74,13 +67,13 @@ class ApplicabilityRegenerationManager(object):
             # Add this tuple to the list of profile tuples for a consumer
             consumer_unit_profiles_map.setdefault(consumer_id, []).append(profile_tuple)
 
-            # We need just one profile_id per profile_hash to be used in regenerate_applicability method
-            # to get the actual profile corresponding to given profile_hash.
+            # We need just one profile_id per profile_hash to be used in regenerate_applicability
+            # method to get the actual profile corresponding to given profile_hash.
             if profile_hash not in profile_hash_profile_id_map:
                 profile_hash_profile_id_map[profile_hash] = profile_id
 
         # Get all repos bound to given consumers
-        bind_criteria = Criteria(filters={'consumer_id': {'$in':consumer_ids}},
+        bind_criteria = Criteria(filters={'consumer_id': {'$in': consumer_ids}},
                                  fields=['repo_id', 'consumer_id'])
         all_repo_bindings = bind_manager.find_by_criteria(bind_criteria)
 
@@ -97,27 +90,29 @@ class ApplicabilityRegenerationManager(object):
                     for unit_profile_tuple in consumer_unit_profiles_map[consumer_id]:
                         repo_profile_hashes.add((repo_id, unit_profile_tuple))
 
-        # Iterate through each tuple in repo_profile_hashes set and regenerate applicability, 
-        # if it doesn't exist. These are all guaranteed to be unique tuples because of the logic 
-        # used to create maps and sets above, eliminating multiple unnecessary queries 
+        # Iterate through each tuple in repo_profile_hashes set and regenerate applicability,
+        # if it doesn't exist. These are all guaranteed to be unique tuples because of the logic
+        # used to create maps and sets above, eliminating multiple unnecessary queries
         # to check for existing applicability for same profiles.
         manager = managers.applicability_regeneration_manager()
         for repo_id, (profile_hash, content_type) in repo_profile_hashes:
             # Check if applicability for given profile_hash and repo_id already exists
-            if self._is_existing_applicability(repo_id, profile_hash):
+            if ApplicabilityRegenerationManager._is_existing_applicability(repo_id, profile_hash):
                 continue
-            # If applicability does not exist, generate applicability data for given profile 
+            # If applicability does not exist, generate applicability data for given profile
             # and repo id.
             profile_id = profile_hash_profile_id_map[profile_hash]
             manager.regenerate_applicability(profile_hash, content_type, profile_id, repo_id)
 
-    def regenerate_applicability_for_repos(self, repo_criteria=None):
+    @staticmethod
+    def regenerate_applicability_for_repos(repo_criteria):
         """
         Regenerate and save applicability data affected by given updated repositories.
 
         :param repo_criteria: The repo selection criteria
-        :type repo_criteria: pulp.server.db.model.criteria.Criteria
+        :type repo_criteria: dict
         """
+        repo_criteria = Criteria.from_dict(repo_criteria)
         repo_query_manager = managers.repo_query_manager()
 
         # Process repo criteria
@@ -126,20 +121,28 @@ class ApplicabilityRegenerationManager(object):
 
         for repo_id in repo_ids:
             # Find all existing applicabilities for given repo_id
-            existing_applicabilities = RepoProfileApplicability.get_collection().find({'repo_id':repo_id})
+            existing_applicabilities = RepoProfileApplicability.get_collection().find(
+                {'repo_id': repo_id})
             for existing_applicability in existing_applicabilities:
                 # Convert cursor to RepoProfileApplicability object
                 existing_applicability = RepoProfileApplicability(**dict(existing_applicability))
                 profile_hash = existing_applicability['profile_hash']
                 unit_profile = UnitProfile.get_collection().find_one({'profile_hash': profile_hash},
-                                                                     fields=['id','content_type'])
-                # Regenerate applicability data for given unit_profile and repo id
-                self.regenerate_applicability(profile_hash, unit_profile['content_type'],
-                                              unit_profile['id'],
-                                              repo_id,
-                                              existing_applicability)
+                                                                     fields=['id', 'content_type'])
+                if unit_profile is None:
+                    # Unit profiles change whenever packages are installed or removed on consumers,
+                    # and it is possible that existing_applicability references a UnitProfile
+                    # that no longer exists. This is harmless, as Pulp has a monthly cleanup task
+                    # that will identify these dangling references and remove them.
+                    continue
 
-    def regenerate_applicability(self, profile_hash, content_type, profile_id,
+                # Regenerate applicability data for given unit_profile and repo id
+                ApplicabilityRegenerationManager.regenerate_applicability(
+                    profile_hash, unit_profile['content_type'], unit_profile['id'], repo_id,
+                    existing_applicability)
+
+    @staticmethod
+    def regenerate_applicability(profile_hash, content_type, profile_id,
                                  bound_repo_id, existing_applicability=None):
         """
         Regenerate and save applicability data for given profile and bound repo id.
@@ -163,19 +166,20 @@ class ApplicabilityRegenerationManager(object):
         """
         profiler_conduit = ProfilerConduit()
         # Get the profiler for content_type of given unit_profile
-        profiler, profiler_cfg = self.__profiler(content_type)
+        profiler, profiler_cfg = ApplicabilityRegenerationManager._profiler(content_type)
 
         # Check if the profiler supports applicability, else return
         if profiler.calculate_applicable_units == Profiler.calculate_applicable_units:
-            # If base class calculate_applicable_units method is called, 
+            # If base class calculate_applicable_units method is called,
             # skip applicability regeneration
             return
 
         # Find out which content types have unit counts greater than zero in the bound repo
-        repo_content_types = self._get_existing_repo_content_types(bound_repo_id)
-        # Get the intersection of existing types in the repo and the types that the profiler handles.
-        # If the intersection is not empty, regenerate applicability
-        if ( set(repo_content_types) & set(profiler.metadata()['types']) ):
+        repo_content_types = ApplicabilityRegenerationManager._get_existing_repo_content_types(
+            bound_repo_id)
+        # Get the intersection of existing types in the repo and the types that the profiler
+        # handles. If the intersection is not empty, regenerate applicability
+        if (set(repo_content_types) & set(profiler.metadata()['types'])):
             # Get the actual profile for existing_applicability or lookup using profile_id
             if existing_applicability:
                 profile = existing_applicability.profile
@@ -183,15 +187,16 @@ class ApplicabilityRegenerationManager(object):
                 unit_profile = UnitProfile.get_collection().find_one({'id': profile_id},
                                                                      fields=['profile'])
                 profile = unit_profile['profile']
-            call_config = PluginCallConfiguration(plugin_config=profiler_cfg, repo_plugin_config=None)
+            call_config = PluginCallConfiguration(plugin_config=profiler_cfg,
+                                                  repo_plugin_config=None)
             try:
                 applicability = profiler.calculate_applicable_units(profile,
                                                                     bound_repo_id,
                                                                     call_config,
                                                                     profiler_conduit)
             except NotImplementedError:
-                _LOG.debug("Profiler for content type [%s] does not support applicability" 
-                           % content_type)
+                msg = "Profiler for content type [%s] does not support applicability" % content_type
+                _logger.debug(msg)
                 return
 
             if existing_applicability:
@@ -205,11 +210,14 @@ class ApplicabilityRegenerationManager(object):
                                                         unit_profile['profile'],
                                                         applicability)
 
-    def _get_existing_repo_content_types(self, repo_id):
+    @staticmethod
+    def _get_existing_repo_content_types(repo_id):
         """
-        For the given repo_id, return a list of content_type_ids that have content units counts greater than 0.
+        For the given repo_id, return a list of content_type_ids that have content units counts
+        greater than 0.
 
-        :param repo_id: The repo_id for the repository that we wish to know the unit types contained therein
+        :param repo_id: The repo_id for the repository that we wish to know the unit types contained
+                        therein
         :type  repo_id: basestring
         :return:        A list of content type ids that have unit counts greater than 0
         :rtype:         list
@@ -222,10 +230,11 @@ class ApplicabilityRegenerationManager(object):
                     repo_content_types_with_non_zero_unit_count.append(content_type)
         return repo_content_types_with_non_zero_unit_count
 
-    def _is_existing_applicability(self, repo_id, profile_hash):
+    @staticmethod
+    def _is_existing_applicability(repo_id, profile_hash):
         """
         Check if applicability for given repo and profle hash is already calculated.
-        
+
         :param repo_id:      repo id
         :type repo_id:       basestring
         :param profile_hash: unit profile hash
@@ -238,7 +247,8 @@ class ApplicabilityRegenerationManager(object):
             return True
         return False
 
-    def __profiler(self, type_id):
+    @staticmethod
+    def _profiler(type_id):
         """
         Find the profiler.
         Returns the Profiler base class when not matched.
@@ -255,6 +265,14 @@ class ApplicabilityRegenerationManager(object):
             plugin = Profiler()
             cfg = {}
         return plugin, cfg
+
+
+regenerate_applicability_for_consumers = task(
+    ApplicabilityRegenerationManager.regenerate_applicability_for_consumers, base=Task,
+    ignore_result=True)
+regenerate_applicability_for_repos = task(
+    ApplicabilityRegenerationManager.regenerate_applicability_for_repos, base=Task,
+    ignore_result=True)
 
 
 class DoesNotExist(Exception):
@@ -312,7 +330,7 @@ class RepoProfileApplicabilityManager(object):
         """
         collection = RepoProfileApplicability.get_collection()
         mongo_applicabilities = collection.find(query_params)
-        applicabilities = [RepoProfileApplicability(**dict(applicability)) \
+        applicabilities = [RepoProfileApplicability(**dict(applicability))
                            for applicability in mongo_applicabilities]
         return applicabilities
 
@@ -598,7 +616,7 @@ def _get_consumer_applicability_map(applicability_map):
                     # sets, generate the union of those sets, and turn it back into a list
                     # so that we can report unique units.
                     consumer_applicability_map[consumers][content_type] = list(
-                        set(consumer_applicability_map[consumers][content_type]) |\
+                        set(consumer_applicability_map[consumers][content_type]) |
                         set(applicability))
                 else:
                     # This consumer set does not already have applicability data for this type, so

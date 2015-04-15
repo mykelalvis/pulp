@@ -1,7 +1,7 @@
 %{!?python_sitelib: %global python_sitelib %(%{__python} -c "from distutils.sysconfig import get_python_lib; print get_python_lib()")}
 
 Name:           python-requests
-Version:        2.0.0
+Version:        2.4.3
 Release:        1%{?dist}
 Summary:        HTTP library, written in Python, for human beings
 
@@ -42,6 +42,20 @@ rm -rf $RPM_BUILD_ROOT
 %{python_sitelib}/requests/*
 
 %changelog
+* Mon Nov 10 2014 Chris Duryee <cduryee@redhat.com> 2.4.3-1
+- 1160794 - update python-requests to 2.4.3 (cduryee@redhat.com)
+- Build for EL 7. (rbarlow@redhat.com)
+
+* Wed Apr 02 2014 Sayli Karmarkar <skarmark@redhat.com> 2.2.1-1
+- correcting a couple of typos in the python-requests version
+  (skarmark@redhat.com)
+- updating nectar dependency on python-requests to version 2.1.1
+  (skarmark@redhat.com)
+- Automatic commit of package [python-requests] minor release [2.2.1-1].
+  (skarmark@redhat.com)
+
+* Fri Mar 14 2014 Sayli Karmarkar <skarmark@redhat.com> 2.2.1-1
+- updating to the latest version 2.2.1 of python-requests dependency
 * Fri Oct 04 2013 Sayli Karmarkar <skarmark@redhat.com> 2.0.0-1
 - New package built with tito. This version vastly improves proxy support, 
 including the CONNECT verb. This fixes https://bugzilla.redhat.com/show_bug.cgi?id=1014368.

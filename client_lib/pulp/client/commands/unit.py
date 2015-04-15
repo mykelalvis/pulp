@@ -1,29 +1,17 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2012-2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
 from gettext import gettext as _
 
 from okaara.cli import CommandUsage
-import sys
 
 from pulp.client.extensions.core import COLOR_FAILURE
-from pulp.common import util
-from pulp.common.constants import DISPLAY_UNITS_DEFAULT_MAXIMUM
 from pulp.bindings.exceptions import BadRequestException
 from pulp.client.commands.criteria import UnitAssociationCriteriaCommand
 from pulp.client.commands.options import OPTION_REPO_ID
 from pulp.client.commands.polling import PollingCommand
 from pulp.client.extensions.extensions import PulpCliCommand, PulpCliOption, PulpCliFlag
+from pulp.common import util
+from pulp.common.constants import DISPLAY_UNITS_DEFAULT_MAXIMUM
 
 
 DESC_COPY = _('copies modules from one repository into another')
@@ -154,7 +142,7 @@ class UnitRemoveCommand(UnitAssociationCriteriaCommand, PollingCommand):
             # Display the successfully processed units
             self.prompt.write(success_string)
             if len(units_successful) == 0:
-                    self.prompt.write(_('  None'), tag="none")
+                self.prompt.write(_('  None'), tag="none")
             elif unit_threshold_reached:
                 self._summary(self.prompt.write, units_successful)
             else:
@@ -197,7 +185,7 @@ class UnitRemoveCommand(UnitAssociationCriteriaCommand, PollingCommand):
         units_by_type = {}
         map(lambda u: units_by_type.setdefault(u['type_id'], []).append(u['unit_key']), units)
 
-        # Each unit is formatted to accomodate its unit key and displayed
+        # Each unit is formatted to accommodate its unit key and displayed
         sorted_type_ids = sorted(units_by_type.keys())
         for type_id in sorted_type_ids:
             unit_list = units_by_type[type_id]
@@ -279,7 +267,7 @@ class UnitCopyCommand(UnitRemoveCommand):
             if 'source_repo_id' in e.extra_data.get('property_names', []):
                 e.extra_data['property_names'].remove('source_repo_id')
                 e.extra_data['property_names'].append('from-repo-id')
-            raise e, None, sys.exc_info()[2]
+            raise
 
     def succeeded(self, task):
         """
@@ -354,13 +342,13 @@ class OrphanUnitListCommand(PulpCliCommand):
         self.prompt.render_document(summary, order=order)
 
 
-class OrphanUnitRemoveCommand(PulpCliCommand):
+class OrphanUnitRemoveCommand(PollingCommand):
     def __init__(self, context):
         self.context = context
         self.prompt = context.prompt
 
         m = _('remove one or more orphaned units')
-        super(OrphanUnitRemoveCommand, self).__init__('remove', m, self.run)
+        super(OrphanUnitRemoveCommand, self).__init__('remove', m, self.run, context)
 
         self.add_option(OPTION_TYPE)
         self.add_option(OPTION_UNIT_ID)
@@ -383,20 +371,4 @@ class OrphanUnitRemoveCommand(PulpCliCommand):
         else:
             raise CommandUsage
 
-        self.check_task_status(response.response_body)
-
-    def check_task_status(self, task):
-        """
-        Check the status of a task response and make appropriate CLI output
-
-        :param task: Task as returned by the API call
-        """
-        response = task.response
-        if response == 'rejected':
-            self.prompt.render_failure_message(_('Request was rejected'))
-            self.prompt.render_reasons(task.reasons)
-        else:
-            self.prompt.render_success_message(_('Request accepted'))
-            self.prompt.write(
-                _('check status of task %(t)s with "pulp-admin tasks details"')
-                % {'t': task.task_id})
+        self.poll(response.response_body, kwargs)

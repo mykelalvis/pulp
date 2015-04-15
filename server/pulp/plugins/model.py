@@ -1,21 +1,10 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 This module contains transfer objects for encapsulating data passed into a
 plugin method call. Objects defined in this module will have extra information
 bundled in that is relevant to the plugin's state for the given entity.
 """
+from pulp.server import constants
+
 
 class Repository(object):
     """
@@ -43,16 +32,25 @@ class Repository(object):
     :ivar content_unit_counts: dictionary of unit types and the count of units
                                of that type associated with the repository.
     :type content_unit_counts: dict
+
+    :param last_unit_added: UTC datetime of the last time a unit was added to the repository
+    :type last_unit_added: datetime.datetime  with tzinfo
+
+    :param last_unit_removed: UTC datetime of the last time a unit was removed from the repository
+    :param last_unit_removed: datetime.datetime with tzinfo
     """
 
     def __init__(self, id, display_name=None, description=None, notes=None,
-                 working_dir=None, content_unit_counts=None):
+                 working_dir=None, content_unit_counts=None, last_unit_added=None,
+                 last_unit_removed=None):
         self.id = id
         self.display_name = display_name
         self.description = description
         self.notes = notes
         self.working_dir = working_dir
         self.content_unit_counts = content_unit_counts or {}
+        self.last_unit_added = last_unit_added
+        self.last_unit_removed = last_unit_removed
 
     def __str__(self):
         return 'Repository [%s]' % self.id
@@ -71,6 +69,7 @@ class RelatedRepository(Repository):
     def __init__(self, id, plugin_configs, display_name=None, description=None, notes=None):
         Repository.__init__(self, id, display_name, description, notes)
         self.plugin_configs = plugin_configs
+
 
 class RepositoryGroup(object):
     """
@@ -107,6 +106,7 @@ class RepositoryGroup(object):
     def __str__(self):
         return 'Repository Group [%s]' % self.id
 
+
 class RelatedRepositoryGroup(RepositoryGroup):
     """
     When validating a plugin configuration, instances of this class will
@@ -130,15 +130,11 @@ class Unit(object):
     may not exist in Pulp; this is meant simply as a way of linking together
     a number of pieces of data.
 
-    @ivar id: Pulp internal ID that refers to this unit; if the unit does not
-              yet exist in Pulp, this will be None
-    @type id: str
+    @ivar type_id: ID of the unit's type
+    @type type_id: str
 
     @ivar unit_key: natural key for the content unit
     @type unit_key: dict
-
-    @ivar type_id: ID of the unit's type
-    @type type_id: str
 
     @ivar metadata: mapping of key/value pairs describing the unit
     @type metadata: dict
@@ -151,6 +147,12 @@ class Unit(object):
         self.type_id = type_id
         self.unit_key = unit_key
         self.metadata = metadata
+
+        # We want to ensure that all units have a pulp_user_metadata attribute in their metadata. If
+        # not supplied, we want to default it to the empty dictionary.
+        if constants.PULP_USER_METADATA_FIELDNAME not in self.metadata:
+            self.metadata[constants.PULP_USER_METADATA_FIELDNAME] = {}
+
         self.storage_path = storage_path
 
         self.id = None
@@ -162,11 +164,7 @@ class Unit(object):
         serializable format.
         """
 
-        d = {
-            'type_id' : self.type_id,
-            'unit_key' : self.unit_key,
-            }
-        return d
+        return {'type_id': self.type_id, 'unit_key': self.unit_key}
 
     def __eq__(self, other):
         return (self.unit_key == other.unit_key) and (self.type_id == other.type_id)
@@ -202,6 +200,7 @@ class AssociatedUnit(Unit):
         self.owner_type = owner_type
         self.owner_id = owner_id
 
+
 class SyncReport(object):
     """
     Returned to the Pulp server at the end of a sync call. This is used by the
@@ -232,10 +231,11 @@ class SyncReport(object):
         self.summary = summary
         self.details = details
 
+
 class PublishReport(object):
     """
     Returned to the Pulp server at the end of a publish call. This is used by the
-    plugin to decrive what took place during the publish run.
+    plugin to derive what took place during the publish run.
 
     @ivar success_flag: if true, the sync was successful; false indicates a
           gracefully handled failure
@@ -247,7 +247,7 @@ class PublishReport(object):
 
     @ivar details: potentially longer log that will have to be specifically
                    retrieved through the Pulp REST APIs
-    @type details: just about any serializable object (likley str or dict)
+    @type details: just about any serializable object (likely str or dict)
     """
 
     def __init__(self, success_flag, summary, details):
@@ -255,6 +255,7 @@ class PublishReport(object):
         self.canceled_flag = False
         self.summary = summary
         self.details = details
+
 
 class Consumer:
     """

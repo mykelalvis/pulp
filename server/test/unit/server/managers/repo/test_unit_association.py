@@ -1,19 +1,6 @@
-#!/usr/bin/python
-#
-# Copyright (c) 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import mock
 
-from ....base import PulpServerTests
+from .... import base
 from pulp.devel import mock_plugins
 from pulp.plugins.conduits.unit_import import ImportUnitConduit
 from pulp.plugins.config import PluginCallConfiguration
@@ -22,15 +9,14 @@ from pulp.plugins.types import database, model
 from pulp.server.db.model.auth import User
 from pulp.server.db.model.criteria import UnitAssociationCriteria
 from pulp.server.db.model.repository import RepoContentUnit, Repo, RepoImporter
+from pulp.server.managers.repo.unit_association import OWNER_TYPE_USER, OWNER_TYPE_IMPORTER
 import pulp.server.exceptions as exceptions
+import pulp.server.managers.content.cud as content_cud_manager
+import pulp.server.managers.factory as manager_factory
 import pulp.server.managers.repo.cud as repo_manager
 import pulp.server.managers.repo.importer as importer_manager
 import pulp.server.managers.repo.unit_association as association_manager
-from pulp.server.managers.repo.unit_association import OWNER_TYPE_USER, OWNER_TYPE_IMPORTER
-import pulp.server.managers.content.cud as content_cud_manager
-import pulp.server.managers.factory as manager_factory
 
-# constants --------------------------------------------------------------------
 
 TYPE_1_DEF = model.TypeDefinition('type-1', 'Type 1', 'Test Definition One',
                                   ['key-1'], ['search-1'], [])
@@ -41,7 +27,8 @@ TYPE_2_DEF = model.TypeDefinition('type-2', 'Type 2', 'Test Definition Two',
 MOCK_TYPE_DEF = model.TypeDefinition('mock-type', 'Mock Type', 'Used by the mock importer',
                                      ['key-1'], [], [])
 
-class RepoUnitAssociationManagerTests(PulpServerTests):
+
+class RepoUnitAssociationManagerTests(base.PulpServerTests):
 
     def clean(self):
         super(RepoUnitAssociationManagerTests, self).clean()
@@ -74,11 +61,11 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.unit_type_id = 'mock-type'
 
         self.unit_id = 'test-unit-id'
-        self.unit_key = {'key-1' : 'test-unit'}
+        self.unit_key = {'key-1': 'test-unit'}
         self.content_manager.add_content_unit(self.unit_type_id, self.unit_id, self.unit_key)
 
         self.unit_id_2 = 'test-unit-id-2'
-        self.unit_key_2 = {'key-1' : 'test-unit-2'}
+        self.unit_key_2 = {'key-1': 'test-unit-2'}
         self.content_manager.add_content_unit(self.unit_type_id, self.unit_id_2, self.unit_key_2)
 
     def test_associate_by_id(self):
@@ -87,11 +74,13 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         """
 
         # Test
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-2', OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-2', OWNER_TYPE_USER,
+                                          'admin')
 
         # Verify
-        repo_units = list(RepoContentUnit.get_collection().find({'repo_id' : self.repo_id}))
+        repo_units = list(RepoContentUnit.get_collection().find({'repo_id': self.repo_id}))
         self.assertEqual(2, len(repo_units))
 
         unit_ids = [u['unit_id'] for u in repo_units]
@@ -104,11 +93,13 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         """
 
         # Test
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin') # shouldn't error
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')  # shouldn't error
 
         # Verify
-        repo_units = list(RepoContentUnit.get_collection().find({'repo_id' : self.repo_id}))
+        repo_units = list(RepoContentUnit.get_collection().find({'repo_id': self.repo_id}))
         self.assertEqual(1, len(repo_units))
         self.assertEqual('unit-1', repo_units[0]['unit_id'])
 
@@ -118,18 +109,20 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         """
 
         # Test
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_IMPORTER, 'test-importer')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_IMPORTER,
+                                          'test-importer')
 
         # Verify
-        repo_units = list(RepoContentUnit.get_collection().find({'repo_id' : self.repo_id}))
-        self.assertEqual(2, len(repo_units))
+        repo_units = list(RepoContentUnit.get_collection().find({'repo_id': self.repo_id}))
+        self.assertEqual(1, len(repo_units))
         self.assertEqual('unit-1', repo_units[0]['unit_id'])
-        self.assertEqual('unit-1', repo_units[1]['unit_id'])
 
     def test_associate_invalid_owner_type(self):
         # Test
-        self.assertRaises(exceptions.InvalidValue, self.manager.associate_unit_by_id, self.repo_id, 'type-1', 'unit-1', 'bad-owner', 'irrelevant')
+        self.assertRaises(exceptions.InvalidValue, self.manager.associate_unit_by_id,
+                          self.repo_id, 'type-1', 'unit-1', 'bad-owner', 'irrelevant')
 
     def test_associate_all(self):
         """
@@ -138,11 +131,14 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
 
         # Test
         ids = ['foo', 'bar', 'baz']
-        self.manager.associate_all_by_ids(self.repo_id, 'type-1', ids, OWNER_TYPE_USER, 'admin')
+        ret = self.manager.associate_all_by_ids(self.repo_id, 'type-1', ids, OWNER_TYPE_USER,
+                                                'admin')
 
         # Verify
-        repo_units = list(RepoContentUnit.get_collection().find({'repo_id' : self.repo_id}))
+        repo_units = list(RepoContentUnit.get_collection().find({'repo_id': self.repo_id}))
         self.assertEqual(len(ids), len(repo_units))
+        # return value should be the number of units that were associated
+        self.assertEqual(ret, len(repo_units))
         for unit in repo_units:
             self.assertTrue(unit['unit_id'] in ids)
 
@@ -152,14 +148,17 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         """
 
         # Setup
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id_2, OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id,
+                                          OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id_2,
+                                          OWNER_TYPE_USER, 'admin')
 
         # Test
-        self.manager.unassociate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_USER, 'admin')
+        self.manager.unassociate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id,
+                                            OWNER_TYPE_USER, 'admin')
 
         # Verify
-        repo_units = list(RepoContentUnit.get_collection().find({'repo_id' : self.repo_id}))
+        repo_units = list(RepoContentUnit.get_collection().find({'repo_id': self.repo_id}))
         self.assertEqual(1, len(repo_units))
         self.assertEqual(self.unit_id_2, repo_units[0]['unit_id'])
 
@@ -169,24 +168,8 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         """
 
         # Test - Make sure this does not raise an error
-        self.manager.unassociate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
-
-    def test_unassociate_by_id_other_owner(self):
-        """
-        Tests that removing the association owned by one party doesn't affect another owner's association.
-        """
-
-        # Setup
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_IMPORTER, 'test-importer')
-
-        # Test
-        self.manager.unassociate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_USER, 'admin')
-
-        # Verify
-        repo_units = list(RepoContentUnit.get_collection().find({'repo_id' : self.repo_id}))
-        self.assertEqual(1, len(repo_units))
-        self.assertEqual(self.unit_id, repo_units[0]['unit_id'])
+        self.manager.unassociate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER,
+                                            'admin')
 
     def test_associate_from_repo_no_criteria(self):
         # Setup
@@ -199,18 +182,22 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.repo_manager.create_repo(dest_repo_id)
         self.importer_manager.set_importer(dest_repo_id, 'mock-importer', {})
 
-        self.content_manager.add_content_unit('mock-type', 'unit-1', {'key-1' : 'unit-1'})
-        self.content_manager.add_content_unit('mock-type', 'unit-2', {'key-1' : 'unit-2'})
-        self.content_manager.add_content_unit('mock-type', 'unit-3', {'key-1' : 'unit-3'})
+        self.content_manager.add_content_unit('mock-type', 'unit-1', {'key-1': 'unit-1'})
+        self.content_manager.add_content_unit('mock-type', 'unit-2', {'key-1': 'unit-2'})
+        self.content_manager.add_content_unit('mock-type', 'unit-3', {'key-1': 'unit-3'})
 
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-2', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-3', OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-2', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-3', OWNER_TYPE_USER,
+                                          'admin')
 
         fake_user = User('associate-user', '')
         manager_factory.principal_manager().set_principal(principal=fake_user)
 
-        mock_plugins.MOCK_IMPORTER.import_units.return_value = [Unit('mock-type', {'k' : 'v'}, {}, '')]
+        mock_plugins.MOCK_IMPORTER.import_units.return_value = [Unit('mock-type', {'k': 'v'}, {},
+                                                                     '')]
 
         # Test
         results = self.manager.associate_from_repo(source_repo_id, dest_repo_id)
@@ -219,17 +206,17 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         # Verify
         self.assertEqual(1, len(associated))
         self.assertEqual(associated[0]['type_id'], 'mock-type')
-        self.assertEqual(associated[0]['unit_key'], {'k' : 'v'})
+        self.assertEqual(associated[0]['unit_key'], {'k': 'v'})
 
         self.assertEqual(1, mock_plugins.MOCK_IMPORTER.import_units.call_count)
 
         args = mock_plugins.MOCK_IMPORTER.import_units.call_args[0]
         kwargs = mock_plugins.MOCK_IMPORTER.import_units.call_args[1]
-        self.assertTrue(isinstance(args[0], Repository)) # repository transfer object
-        self.assertEqual(args[0].id, 'source-repo') # repo importing units from
-        self.assertEqual(args[1].id, 'dest-repo') # repo importing units into
-        self.assertEqual(None, kwargs['units']) # units to import
-        self.assertTrue(isinstance(args[3], PluginCallConfiguration)) # config
+        self.assertTrue(isinstance(args[0], Repository))  # repository transfer object
+        self.assertEqual(args[0].id, 'source-repo')  # repo importing units from
+        self.assertEqual(args[1].id, 'dest-repo')  # repo importing units into
+        self.assertEqual(None, kwargs['units'])  # units to import
+        self.assertTrue(isinstance(args[3], PluginCallConfiguration))  # config
 
         conduit = args[2]
         self.assertTrue(isinstance(conduit, ImportUnitConduit))
@@ -250,35 +237,42 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.repo_manager.create_repo(dest_repo_id)
         self.importer_manager.set_importer(dest_repo_id, 'mock-importer', {})
 
-        self.content_manager.add_content_unit('mock-type', 'unit-1', {'key-1' : 'unit-1', 'key-2':'foo', 'key-3':'bar'})
-        self.content_manager.add_content_unit('mock-type', 'unit-2', {'key-1' : 'unit-2', 'key-2':'foo', 'key-3':'bar'})
-        self.content_manager.add_content_unit('mock-type', 'unit-3', {'key-1' : 'unit-3', 'key-2':'foo', 'key-3':'bar'})
+        self.content_manager.add_content_unit('mock-type', 'unit-1',
+                                              {'key-1': 'unit-1', 'key-2': 'foo', 'key-3': 'bar'})
+        self.content_manager.add_content_unit('mock-type', 'unit-2',
+                                              {'key-1': 'unit-2', 'key-2': 'foo', 'key-3': 'bar'})
+        self.content_manager.add_content_unit('mock-type', 'unit-3',
+                                              {'key-1': 'unit-3', 'key-2': 'foo', 'key-3': 'bar'})
 
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-2', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-3', OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-2', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-3', OWNER_TYPE_USER,
+                                          'admin')
 
-        mock_plugins.MOCK_IMPORTER.import_units.return_value = [Unit('mock-type', {'k' : 'v'}, {}, '')]
+        mock_plugins.MOCK_IMPORTER.import_units.return_value = [Unit('mock-type', {'k': 'v'}, {},
+                                                                     '')]
 
         # Test
-        overrides = { 'abc': '123'}
+        overrides = {'abc': '123'}
         criteria = UnitAssociationCriteria(type_ids=['mock-type'],
-                                           unit_filters={'key-1' : 'unit-2'},
+                                           unit_filters={'key-1': 'unit-2'},
                                            unit_fields=['key-1', 'key-2'])
         results = self.manager.associate_from_repo(source_repo_id, dest_repo_id, criteria=criteria,
-                                                      import_config_override=overrides)
+                                                   import_config_override=overrides)
         associated = results['units_successful']
 
         # Verify
         self.assertEqual(1, len(associated))
         self.assertEqual(associated[0]['type_id'], 'mock-type')
-        self.assertEqual(associated[0]['unit_key'], {'k' : 'v'})
+        self.assertEqual(associated[0]['unit_key'], {'k': 'v'})
 
         self.assertEqual(1, mock_plugins.MOCK_IMPORTER.import_units.call_count)
 
         args = mock_plugins.MOCK_IMPORTER.import_units.call_args[0]
         kwargs = mock_plugins.MOCK_IMPORTER.import_units.call_args[1]
-        for k,v in overrides.items():
+        for k, v in overrides.items():
             self.assertEqual(args[3].get(k), v)
         # make sure the criteria's "unit_fields" are being respected by giving
         # us key-2, but not key-3
@@ -298,13 +292,14 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.repo_manager.create_repo(dest_repo_id)
         self.importer_manager.set_importer(dest_repo_id, 'mock-importer', {})
 
-        self.manager.associate_unit_by_id(source_repo_id, 'bad-type', 'unit-1', OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(source_repo_id, 'bad-type', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
 
         # Test
         try:
             self.manager.associate_from_repo(source_repo_id, dest_repo_id)
             self.fail('Exception expected')
-        except exceptions.InvalidValue, e:
+        except exceptions.InvalidValue:
             pass
 
     def test_associate_from_repo_dest_unsupported_types(self):
@@ -318,11 +313,8 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.repo_manager.create_repo(dest_repo_id)
 
         # Test
-        try:
-            self.manager.associate_from_repo(source_repo_id, dest_repo_id)
-            self.fail('Exception expected')
-        except exceptions.MissingResource, e:
-            print(e)
+        self.assertRaises(exceptions.MissingResource,
+                          self.manager.associate_from_repo, source_repo_id, dest_repo_id)
 
     def test_associate_from_repo_importer_error(self):
         # Setup
@@ -337,8 +329,9 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
 
         mock_plugins.MOCK_IMPORTER.import_units.side_effect = Exception()
 
-        self.content_manager.add_content_unit('mock-type', 'unit-1', {'key-1' : 'unit-1'})
-        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-1', OWNER_TYPE_USER, 'admin')
+        self.content_manager.add_content_unit('mock-type', 'unit-1', {'key-1': 'unit-1'})
+        self.manager.associate_unit_by_id(source_repo_id, 'mock-type', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
 
         # Test
         try:
@@ -362,11 +355,13 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.importer_manager.set_importer(dest_repo_id, 'mock-importer', {})
 
         # Test
-        criteria = UnitAssociationCriteria(type_ids=['mock-type'], unit_filters={'key-1' : 'no way this matches squat'})
-        self.manager.associate_from_repo(source_repo_id, dest_repo_id, criteria=criteria)
+        criteria = UnitAssociationCriteria(type_ids=['mock-type'],
+                                           unit_filters={'key-1': 'no way this matches squat'})
+        ret = self.manager.associate_from_repo(source_repo_id, dest_repo_id, criteria=criteria)
 
         # Verify
         self.assertEqual(0, mock_plugins.MOCK_IMPORTER.import_units.call_count)
+        self.assertEqual(ret.get('units_successful'), [])
 
     def test_associate_from_repo_missing_source(self):
         # Setup
@@ -403,6 +398,13 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
 
         mock_call.assert_called_once_with(self.repo_id, 'type-1', 1)
 
+    @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_last_unit_added')
+    def test_associate_by_id_calls_update_last_unit_added(self, mock_call):
+        self.manager.associate_unit_by_id(
+            self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
+
+        mock_call.assert_called_once_with(self.repo_id)
+
     @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_unit_count')
     def test_associate_by_id_does_not_call_update_unit_count(self, mock_call):
         """
@@ -424,7 +426,7 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         # incremented
         self.manager.associate_unit_by_id(
             self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin2')
-        self.assertEqual(mock_call.call_count, 1) # only from first associate
+        self.assertEqual(mock_call.call_count, 1)  # only from first associate
 
     @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_unit_count')
     def test_associate_all_by_ids_calls_update_unit_count(self, mock_call):
@@ -434,6 +436,13 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
             self.repo_id, 'type-1', IDS, OWNER_TYPE_USER, 'admin')
 
         mock_call.assert_called_once_with(self.repo_id, 'type-1', len(IDS))
+
+    @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_last_unit_added')
+    def test_associate_all_by_id_calls_update_last_unit_added(self, mock_call):
+        self.manager.associate_unit_by_id(
+            self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
+
+        mock_call.assert_called_once_with(self.repo_id)
 
     @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_unit_count')
     def test_associate_all_non_unique(self, mock_call):
@@ -454,18 +463,23 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         """
 
         # Setup
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id_2, OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, 'type-2', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, 'type-2', 'unit-2', OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id,
+                                          OWNER_TYPE_USER, 'admin')
+        # Add a different user to ensure they will remove properly
+        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id_2,
+                                          OWNER_TYPE_IMPORTER, 'foo')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-2', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-2', 'unit-2', OWNER_TYPE_USER,
+                                          'admin')
 
         unit_coll = RepoContentUnit.get_collection()
-        self.assertEqual(4, len(list(unit_coll.find({'repo_id' : self.repo_id}))))
+        self.assertEqual(4, len(list(unit_coll.find({'repo_id': self.repo_id}))))
 
         # Test
         results = self.manager.unassociate_all_by_ids(self.repo_id, self.unit_type_id,
-                                                           [self.unit_id, self.unit_id_2],
-                                                           OWNER_TYPE_USER, 'admin')
+                                                      [self.unit_id, self.unit_id_2],
+                                                      OWNER_TYPE_USER, 'admin')
         unassociated = results['units_successful']
 
         # Verify
@@ -475,10 +489,12 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
             self.assertTrue(u['type_id'], self.unit_type_id)
             self.assertTrue(u['unit_key'] in [self.unit_key, self.unit_key_2])
 
-        self.assertEqual(2, len(list(unit_coll.find({'repo_id' : self.repo_id}))))
+        self.assertEqual(2, len(list(unit_coll.find({'repo_id': self.repo_id}))))
 
-        self.assertTrue(unit_coll.find_one({'repo_id' : self.repo_id, 'unit_type_id' : 'type-2', 'unit_id' : 'unit-1'}) is not None)
-        self.assertTrue(unit_coll.find_one({'repo_id' : self.repo_id, 'unit_type_id' : 'type-2', 'unit_id' : 'unit-2'}) is not None)
+        self.assertTrue(unit_coll.find_one({'repo_id': self.repo_id, 'unit_type_id': 'type-2',
+                                            'unit_id': 'unit-1'}) is not None)
+        self.assertTrue(unit_coll.find_one({'repo_id': self.repo_id, 'unit_type_id': 'type-2',
+                                            'unit_id': 'unit-2'}) is not None)
 
     @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_unit_count')
     def test_unassociate_by_id_calls_update_unit_count(self, mock_call):
@@ -507,7 +523,7 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         # should not change
         self.manager.unassociate_unit_by_id(
             self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin1')
-        self.assertEqual(mock_call.call_count, 1) # only once for the associates
+        self.assertEqual(mock_call.call_count, 1)  # only once for the associates
 
     @mock.patch('pymongo.cursor.Cursor.count', return_value=1)
     def test_association_exists_true(self, mock_count):
@@ -519,22 +535,12 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
         self.assertFalse(self.manager.association_exists(self.repo_id, 'type-1', 'unit-1'))
         self.assertEqual(mock_count.call_count, 1)
 
-    # unassociation via criteria tests -----------------------------------------
-
-#        criteria_doc = {'association_filters': None,
-#                        'unit_filters': None,
-#                        'association_sort': None,
-#                        'unit_sort': None,
-#                        'limit': None,
-#                        'skip': None,
-#                        'association_fields': None,
-#                        'unit_fields': None,
-#                        'remove_duplicates': True}
-
-
-    def test_unassociate_via_criteria(self):
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id, OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id_2, OWNER_TYPE_USER, 'admin')
+    @mock.patch('pulp.server.managers.repo.cud.RepoManager.update_last_unit_removed')
+    def test_unassociate_via_criteria(self, mock_call):
+        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id,
+                                          OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(self.repo_id, self.unit_type_id, self.unit_id_2,
+                                          OWNER_TYPE_USER, 'admin')
 
         criteria_doc = {'filters': {'association': {'unit_id': {'$in': [self.unit_id, 'unit-X']}}}}
 
@@ -542,18 +548,25 @@ class RepoUnitAssociationManagerTests(PulpServerTests):
 
         self.manager.unassociate_by_criteria(self.repo_id, criteria, OWNER_TYPE_USER, 'admin')
 
-        self.assertFalse(self.manager.association_exists(self.repo_id, self.unit_id, self.unit_type_id))
-        self.assertTrue(self.manager.association_exists(self.repo_id, self.unit_id_2, self.unit_type_id))
+        self.assertFalse(self.manager.association_exists(self.repo_id, self.unit_id,
+                                                         self.unit_type_id))
+        self.assertTrue(self.manager.association_exists(self.repo_id, self.unit_id_2,
+                                                        self.unit_type_id))
+        mock_call.assert_called_once_with(self.repo_id)
 
     def test_unassociate_via_criteria_no_matches(self):
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER, 'admin')
-        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-2', OWNER_TYPE_USER, 'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-1', OWNER_TYPE_USER,
+                                          'admin')
+        self.manager.associate_unit_by_id(self.repo_id, 'type-1', 'unit-2', OWNER_TYPE_USER,
+                                          'admin')
 
         criteria_doc = {'type_ids': ['type-2']}
 
         criteria = UnitAssociationCriteria.from_client_input(criteria_doc)
 
-        self.manager.unassociate_by_criteria(self.repo_id, criteria, OWNER_TYPE_USER, 'admin')
+        result = self.manager.unassociate_by_criteria(self.repo_id, criteria,
+                                                      OWNER_TYPE_USER, 'admin')
+        self.assertEquals(result, {})
 
         self.assertTrue(self.manager.association_exists(self.repo_id, 'unit-1', 'type-1'))
         self.assertTrue(self.manager.association_exists(self.repo_id, 'unit-2', 'type-1'))

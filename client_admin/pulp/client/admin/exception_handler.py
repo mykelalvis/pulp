@@ -1,26 +1,25 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
+import logging
 from gettext import gettext as _
 
 from pulp.client.extensions.exceptions import ExceptionHandler, CODE_PERMISSIONS_EXCEPTION
 from pulp.common import auth_utils
 
-# -- admin client overrides ---------------------------------------------------
+
+_logger = logging.getLogger(__name__)
+
 
 class AdminExceptionHandler(ExceptionHandler):
+    def handle_expired_client_cert(self, e):
+        """
+        Handles the exception raised when the client certificate has expired.
 
-    def handle_client_ssl(self, e):
-        exit_code = ExceptionHandler.handle_client_ssl(self, e)
+        :param e: The Exception that was raised
+        :type  e: pulp.bindings.exceptions.ClientCertificateExpiredException
+        :return:  The exit code to be used.
+        :rtype:   int
+        """
+        exit_code = ExceptionHandler.handle_expired_client_cert(self, e)
+
         desc = _('Use the login command to authenticate with the server and '
                  'download a new session certificate.')
         self.prompt.render_paragraph(desc)
@@ -34,13 +33,13 @@ class AdminExceptionHandler(ExceptionHandler):
         :return: appropriate exit code for this error
         """
 
-        self._log_client_exception(e)
+        _logger.error(e)
 
         handlers = {
-            auth_utils.CODE_FAILED : self._handle_authentication_failed,
-            auth_utils.CODE_PERMISSION : self._handle_permission_error,
-            auth_utils.CODE_INVALID_SSL_CERT : self._handle_authentication_failed,
-            auth_utils.CODE_USER_PASS : self._handle_invalid_username,
+            auth_utils.CODE_FAILED: self._handle_authentication_failed,
+            auth_utils.CODE_PERMISSION: self._handle_permission_error,
+            auth_utils.CODE_INVALID_SSL_CERT: self._handle_authentication_failed,
+            auth_utils.CODE_USER_PASS: self._handle_invalid_username,
         }
 
         error_code = auth_utils.get_error_code(e.extra_data)

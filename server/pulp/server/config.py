@@ -1,31 +1,18 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2010 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import os
 import socket
 from ConfigParser import SafeConfigParser
 
-# global configuration --------------------------------------------------------
 
-config = None # ConfigParser.SafeConfigParser instance
+config = None  # ConfigParser.SafeConfigParser instance
 
 # to guarantee that a section and/or setting exists, add a default value here
 _default_values = {
-    'consumer_history': {
-        'lifetime': '180', # in days
+    'authentication': {
+        'rsa_key': '/etc/pki/pulp/rsa.key',
+        'rsa_pub': '/etc/pki/pulp/rsa_pub.key',
     },
-    'coordinator': {
-        'task_state_poll_interval': '0.1',
+    'consumer_history': {
+        'lifetime': '180',  # in days
     },
     'data_reaping': {
         'reaper_interval': '0.25',
@@ -34,19 +21,30 @@ _default_values = {
         'repo_sync_history': '60',
         'repo_publish_history': '60',
         'repo_group_publish_history': '60',
+        'task_status_history': '7',
+        'task_result_history': '3',
     },
     'database': {
         'name': 'pulp_database',
         'seeds': 'localhost:27017',
-        'operation_retries': '2',
+        'username': '',
+        'password': '',
+        'ssl': 'false',
+        'ssl_keyfile': '',
+        'ssl_certfile': '',
+        'verify_ssl': 'true',
+        'ca_path': '/etc/pki/tls/certs/ca-bundle.crt',
     },
     'email': {
         'host': 'localhost',
         'port': '25',
-        'enabled' : 'false'
+        'enabled': 'false',
+        'from': 'pulp@localhost',
     },
     'oauth': {
-        'enabled': 'false',
+        'enabled': 'true',
+        'oauth_key': '',
+        'oauth_secret': '',
     },
     'ldap': {
         'enabled': 'false',
@@ -54,28 +52,20 @@ _default_values = {
         'base': 'dc=localhost',
         'tls': 'false',
     },
-    'logs': {
-        'config': '/etc/pulp/logging/basic.cfg',
-        'db_config' : '/etc/pulp/logging/db.cfg',
-    },
     'messaging': {
         'url': 'tcp://localhost:5672',
+        'transport': 'qpid',
+        'auth_enabled': 'true',
         'cacert': '/etc/pki/qpid/ca/ca.crt',
         'clientcert': '/etc/pki/qpid/client/client.pem',
         'topic_exchange': 'amq.topic',
-        'install_timeout': '10:600',
-        'update_timeout': '10:600',
-        'uninstall_timeout': '10:600',
-        'bind_timeout': '2592000:600',
-        'unbind_timeout': '2592000:600',
-    },
-    'scheduler': {
-        'dispatch_interval': '30',
+        'event_notifications_enabled': 'false',
+        'event_notification_url': 'qpid://localhost:5672/',
     },
     'security': {
         'cacert': '/etc/pki/pulp/ca.crt',
         'cakey': '/etc/pki/pulp/ca.key',
-        'ssl_ca_certificate' : '/etc/pki/pulp/ssl_ca.crt',
+        'ssl_ca_certificate': '/etc/pki/pulp/ssl_ca.crt',
         'user_cert_expiration': '7',
         'consumer_cert_expiration': '3650',
         'serial_number_path': '/var/lib/pulp/sn.dat',
@@ -86,22 +76,23 @@ _default_values = {
         'default_password': 'admin',
         'debugging_mode': 'false',
         'storage_dir': '/var/lib/pulp/',
+        'log_level': 'INFO',
+        'key_url': '/pulp/gpg',
+        'ks_url': '/pulp/ks',
+        'working_directory': '/var/cache/pulp'
     },
     'tasks': {
-        'concurrency_threshold': '9',
-        'dispatch_interval': '0.5',
-        'archived_call_lifetime': '48',
-        'consumer_content_weight': '0',
-        'create_weight': '0',
-        'publish_weight': '1',
-        'sync_weight': '2',
+        'broker_url': 'qpid://guest@localhost/',
+        'celery_require_ssl': 'false',
+        'cacert': '/etc/pki/pulp/qpid/ca.crt',
+        'keyfile': '/etc/pki/pulp/qpid/client.crt',
+        'certfile': '/etc/pki/pulp/qpid/client.crt',
     },
 }
 
 # to add a default configuration file, list the full path here
 _config_files = ['/etc/pulp/server.conf']
 
-# configuration api -----------------------------------------------------------
 
 def check_config_files():
     """
@@ -113,7 +104,6 @@ def check_config_files():
             raise RuntimeError('Cannot find configuration file: %s' % config_file)
         if not os.access(config_file, os.R_OK):
             raise RuntimeError('Cannot read configuration file: %s' % config_file)
-    return 'Yeah!'
 
 
 def load_configuration():
@@ -161,6 +151,5 @@ def remove_config_file(file_path):
     _config_files.remove(file_path)
     load_configuration()
 
-# ------------------------------------------------------------------------------
 
 load_configuration()

@@ -15,6 +15,7 @@ from pulp.server.db.model.base import Model
 
 # -- classes -----------------------------------------------------------------
 
+
 class User(Model):
     """
     Represents a user of Pulp.
@@ -76,7 +77,6 @@ class Role(Model):
         self.permissions = permissions or {}
 
 
-
 class Permission(Model):
     """
     Represents the user permissions associated with a pulp resource.
@@ -84,8 +84,8 @@ class Permission(Model):
     @ivar resource: uri path of resource
     @type resource: str
 
-    @ivar users: dictionary of user login: tuple of allowed operations
-    @type users: dict
+    @ivar users: list of dictionaries of user logins and permissions
+    @type users: list
     """
 
     collection_name = 'permissions'
@@ -95,4 +95,4 @@ class Permission(Model):
         super(Permission, self).__init__()
 
         self.resource = resource
-        self.users = users or {}
+        self.users = users or []

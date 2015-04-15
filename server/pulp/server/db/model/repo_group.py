@@ -1,19 +1,8 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import traceback as traceback_module
 
 from pulp.server.db.model.base import Model
+from pulp.server.db.model.reaper_base import ReaperMixin
+
 
 class RepoGroup(Model):
     """
@@ -58,7 +47,10 @@ class RepoGroupDistributor(Model):
         self.scratchpad = None
 
 
-class RepoGroupPublishResult(Model):
+class RepoGroupPublishResult(Model, ReaperMixin):
+    """
+    The documents in this collection may be reaped, so it inherits from ReaperMixin.
+    """
 
     collection_name = 'repo_group_publish_results'
 
@@ -67,7 +59,8 @@ class RepoGroupPublishResult(Model):
     RESULT_ERROR = 'error'
 
     @classmethod
-    def error_result(cls, group_id, distributor_id, distributor_type_id, started, completed, exception, traceback):
+    def error_result(cls, group_id, distributor_id, distributor_type_id, started,
+                     completed, exception, traceback):
         """
         Creates a new history entry for a failed publish. The details of the error
         raised from the plugin are captured.
@@ -129,7 +122,8 @@ class RepoGroupPublishResult(Model):
         @type  details: any serializable
         """
 
-        r = cls(group_id, distributor_id, distributor_type_id, started, completed, cls.RESULT_SUCCESS)
+        r = cls(group_id, distributor_id, distributor_type_id, started, completed,
+                cls.RESULT_SUCCESS)
         r.summary = summary
         r.details = details
 
@@ -163,7 +157,8 @@ class RepoGroupPublishResult(Model):
         @type  details: any serializable
         """
 
-        r = cls(group_id, distributor_id, distributor_type_id, started, completed, cls.RESULT_FAILED)
+        r = cls(group_id, distributor_id, distributor_type_id, started, completed,
+                cls.RESULT_FAILED)
         r.summary = summary
         r.details = details
 
@@ -191,4 +186,3 @@ class RepoGroupPublishResult(Model):
 
         self.summary = None
         self.details = None
-

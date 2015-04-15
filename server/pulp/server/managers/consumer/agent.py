@@ -1,18 +1,3 @@
-#!/usr/bin/python
-#
-# Copyright (c) 2012 Red Hat, Inc.
-#
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-
 """
 Contains agent management classes
 """
@@ -20,24 +5,31 @@ Contains agent management classes
 import sys
 
 from logging import getLogger
+from uuid import uuid4
+from gettext import gettext as _
 
-from pulp.server.dispatch import factory
-from pulp.server.managers import factory as managers
-from pulp.server.db.model.consumer import Bind
-from pulp.plugins.loader import api as plugin_api
-from pulp.plugins.loader import exceptions as plugin_exceptions
-from pulp.plugins.profiler import Profiler, InvalidUnitsRequested
+from celery import task
+
+from pulp.common import tags
 from pulp.plugins.conduits.profiler import ProfilerConduit
+from pulp.plugins.loader import api as plugin_api, exceptions as plugin_exceptions
 from pulp.plugins.model import Consumer as ProfiledConsumer
-from pulp.server.exceptions import (
-    MissingResource,
-    PulpExecutionException,
-    PulpDataException
-)
-from pulp.server.agent import PulpAgent
+from pulp.plugins.profiler import Profiler, InvalidUnitsRequested
+from pulp.server.agent.context import Context
+from pulp.server.agent.direct.pulpagent import PulpAgent
+from pulp.server.async.tasks import Task
+from pulp.server.db.model.consumer import Bind
+from pulp.server.db.model.dispatch import TaskStatus
+from pulp.server.exceptions import PulpExecutionException, PulpDataException, MissingResource
+from pulp.server.managers import factory as managers
 
 
-_LOG = getLogger(__name__)
+QUEUE_DELETE_DELAY = 600  # 10 min.
+QUEUE_DELETE_FAILED = _('queue %(name)s cannot be deleted: %(reason)s')
+QUEUE_DELETED = _('queue %(name)s deleted')
+
+
+logger = getLogger(__name__)
 
 
 class AgentManager(object):
@@ -45,20 +37,31 @@ class AgentManager(object):
     The agent manager.
     """
 
-    def unregistered(self, consumer_id):
+    @staticmethod
+    def unregister(consumer_id):
         """
         Notification that a consumer (agent) has
         been unregistered.  This ensure that all registration
-        artifacts have been cleaned up.
+        artifacts have been cleaned up.  Then, we fire off a task to lazily
+        delete the agent queue.
         :param consumer_id: The consumer ID.
         :type consumer_id: str
         """
         manager = managers.consumer_manager()
         consumer = manager.get_consumer(consumer_id)
-        agent = PulpAgent(consumer)
-        agent.consumer.unregistered()
+        context = Context(consumer)
+        agent = PulpAgent()
+        agent.consumer.unregister(context)
+        url = context.url
+        name = context.address.split('/')[-1]
+        task_tags = [tags.resource_tag(tags.ACTION_AGENT_QUEUE_DELETE, consumer_id)]
+        delete_queue.apply_async(
+            args=[url, name, consumer_id],
+            countdown=QUEUE_DELETE_DELAY,
+            tags=task_tags)
 
-    def bind(self, consumer_id, repo_id, distributor_id, options):
+    @staticmethod
+    def bind(consumer_id, repo_id, distributor_id, options):
         """
         Request the agent to perform the specified bind. This method will be called
         after the server-side representation of the binding has been created.
@@ -71,29 +74,48 @@ class AgentManager(object):
         :type distributor_id: str
         :param options: The options are handler specific.
         :type options: dict
+        :return: The task created by the bind
+        :rtype: dict
         """
+        # track agent operations using a pseudo task
+        task_id = str(uuid4())
+        task_tags = [
+            tags.resource_tag(tags.RESOURCE_CONSUMER_TYPE, consumer_id),
+            tags.resource_tag(tags.RESOURCE_REPOSITORY_TYPE, repo_id),
+            tags.resource_tag(tags.RESOURCE_REPOSITORY_DISTRIBUTOR_TYPE, distributor_id),
+            tags.action_tag(tags.ACTION_AGENT_BIND)
+        ]
+        task = TaskStatus(task_id, 'agent', tags=task_tags).save()
+
         # agent request
         consumer_manager = managers.consumer_manager()
         binding_manager = managers.consumer_bind_manager()
-
         consumer = consumer_manager.get_consumer(consumer_id)
         binding = binding_manager.get_bind(consumer_id, repo_id, distributor_id)
+        agent_bindings = AgentManager._bindings([binding])
+        context = Context(
+            consumer,
+            task_id=task_id,
+            action='bind',
+            consumer_id=consumer_id,
+            repo_id=repo_id,
+            distributor_id=distributor_id)
+        agent = PulpAgent()
+        agent.consumer.bind(context, agent_bindings, options)
 
-        agent_bindings = self.__bindings([binding])
-        agent = PulpAgent(consumer)
-        agent.consumer.bind(agent_bindings, options)
-
-        # request tracking
-        action_id = factory.context().call_request_id
+        # bind action tracking
         consumer_manager = managers.consumer_bind_manager()
         consumer_manager.action_pending(
             consumer_id,
             repo_id,
             distributor_id,
             Bind.Action.BIND,
-            action_id)
+            task_id)
 
-    def unbind(self, consumer_id, repo_id, distributor_id, options):
+        return task
+
+    @staticmethod
+    def unbind(consumer_id, repo_id, distributor_id, options):
         """
         Request the agent to perform the specified unbind.
         :param consumer_id: The consumer ID.
@@ -104,25 +126,47 @@ class AgentManager(object):
         :type distributor_id: str
         :param options: The options are handler specific.
         :type options: dict
+        :return: A task ID that may be used to track the agent request.
+        :rtype: str
         """
+        # track agent operations using a pseudo task
+        task_id = str(uuid4())
+        task_tags = [
+            tags.resource_tag(tags.RESOURCE_CONSUMER_TYPE, consumer_id),
+            tags.resource_tag(tags.RESOURCE_REPOSITORY_TYPE, repo_id),
+            tags.resource_tag(tags.RESOURCE_REPOSITORY_DISTRIBUTOR_TYPE, distributor_id),
+            tags.action_tag(tags.ACTION_AGENT_UNBIND)
+        ]
+        task = TaskStatus(task_id, 'agent', tags=task_tags).save()
+
         # agent request
         manager = managers.consumer_manager()
         consumer = manager.get_consumer(consumer_id)
         binding = dict(repo_id=repo_id, distributor_id=distributor_id)
-        bindings = self.__unbindings([binding])
-        agent = PulpAgent(consumer)
-        agent.consumer.unbind(bindings, options)
-        # request tracking
-        action_id = factory.context().call_request_id
+        bindings = AgentManager._unbindings([binding])
+        context = Context(
+            consumer,
+            task_id=task_id,
+            action='unbind',
+            consumer_id=consumer_id,
+            repo_id=repo_id,
+            distributor_id=distributor_id)
+        agent = PulpAgent()
+        agent.consumer.unbind(context, bindings, options)
+
+        # unbind action tracking
         manager = managers.consumer_bind_manager()
         manager.action_pending(
             consumer_id,
             repo_id,
             distributor_id,
             Bind.Action.UNBIND,
-            action_id)
+            task_id)
 
-    def install_content(self, consumer_id, units, options):
+        return task
+
+    @staticmethod
+    def install_content(consumer_id, units, options):
         """
         Install content units on a consumer.
         :param consumer_id: The consumer ID.
@@ -132,15 +176,26 @@ class AgentManager(object):
             { type_id:<str>, unit_key:<dict> }
         :param options: Install options; based on unit type.
         :type options: dict
+        :return: A task used to track the agent request.
+        :rtype: dict
         """
+        # track agent operations using a pseudo task
+        task_id = str(uuid4())
+        task_tags = [
+            tags.resource_tag(tags.RESOURCE_CONSUMER_TYPE, consumer_id),
+            tags.action_tag(tags.ACTION_AGENT_UNIT_INSTALL)
+        ]
+        task = TaskStatus(task_id, 'agent', tags=task_tags).save()
+
+        # agent request
         manager = managers.consumer_manager()
         consumer = manager.get_consumer(consumer_id)
         conduit = ProfilerConduit()
         collated = Units(units)
         for typeid, units in collated.items():
-            pc = self.__profiled_consumer(consumer_id)
-            profiler, cfg = self.__profiler(typeid)
-            units = self.__invoke_plugin(
+            pc = AgentManager._profiled_consumer(consumer_id)
+            profiler, cfg = AgentManager._profiler(typeid)
+            units = AgentManager._invoke_plugin(
                 profiler.install_units,
                 pc,
                 units,
@@ -149,10 +204,15 @@ class AgentManager(object):
                 conduit)
             collated[typeid] = units
         units = collated.join()
-        agent = PulpAgent(consumer)
-        agent.content.install(units, options)
+        context = Context(consumer, task_id=task_id, consumer_id=consumer_id)
+        agent = PulpAgent()
+        agent.content.install(context, units, options)
+        history_manager = managers.consumer_history_manager()
+        history_manager.record_event(consumer_id, 'content_unit_installed', {'units': units})
+        return task
 
-    def update_content(self, consumer_id, units, options):
+    @staticmethod
+    def update_content(consumer_id, units, options):
         """
         Update content units on a consumer.
         :param consumer_id: The consumer ID.
@@ -162,15 +222,26 @@ class AgentManager(object):
             { type_id:<str>, unit_key:<dict> }
         :param options: Update options; based on unit type.
         :type options: dict
+        :return: A task used to track the agent request.
+        :rtype: dict
         """
+        # track agent operations using a pseudo task
+        task_id = str(uuid4())
+        task_tags = [
+            tags.resource_tag(tags.RESOURCE_CONSUMER_TYPE, consumer_id),
+            tags.action_tag(tags.ACTION_AGENT_UNIT_UPDATE)
+        ]
+        task = TaskStatus(task_id, 'agent', tags=task_tags).save()
+
+        # agent request
         manager = managers.consumer_manager()
         consumer = manager.get_consumer(consumer_id)
         conduit = ProfilerConduit()
         collated = Units(units)
         for typeid, units in collated.items():
-            pc = self.__profiled_consumer(consumer_id)
-            profiler, cfg = self.__profiler(typeid)
-            units = self.__invoke_plugin(
+            pc = AgentManager._profiled_consumer(consumer_id)
+            profiler, cfg = AgentManager._profiler(typeid)
+            units = AgentManager._invoke_plugin(
                 profiler.update_units,
                 pc,
                 units,
@@ -179,10 +250,13 @@ class AgentManager(object):
                 conduit)
             collated[typeid] = units
         units = collated.join()
-        agent = PulpAgent(consumer)
-        agent.content.update(units, options)
+        context = Context(consumer, task_id=task_id, consumer_id=consumer_id)
+        agent = PulpAgent()
+        agent.content.update(context, units, options)
+        return task
 
-    def uninstall_content(self, consumer_id, units, options):
+    @staticmethod
+    def uninstall_content(consumer_id, units, options):
         """
         Uninstall content units on a consumer.
         :param consumer_id: The consumer ID.
@@ -192,15 +266,26 @@ class AgentManager(object):
             { type_id:<str>, type_id:<dict> }
         :param options: Uninstall options; based on unit type.
         :type options: dict
+        :return: A task ID that may be used to track the agent request.
+        :rtype: dict
         """
+        # track agent operations using a pseudo task
+        task_id = str(uuid4())
+        task_tags = [
+            tags.resource_tag(tags.RESOURCE_CONSUMER_TYPE, consumer_id),
+            tags.action_tag(tags.ACTION_AGENT_UNIT_UNINSTALL)
+        ]
+        task = TaskStatus(task_id, 'agent', tags=task_tags).save()
+
+        # agent request
         manager = managers.consumer_manager()
         consumer = manager.get_consumer(consumer_id)
         conduit = ProfilerConduit()
         collated = Units(units)
         for typeid, units in collated.items():
-            pc = self.__profiled_consumer(consumer_id)
-            profiler, cfg = self.__profiler(typeid)
-            units = self.__invoke_plugin(
+            pc = AgentManager._profiled_consumer(consumer_id)
+            profiler, cfg = AgentManager._profiler(typeid)
+            units = AgentManager._invoke_plugin(
                 profiler.uninstall_units,
                 pc,
                 units,
@@ -209,8 +294,12 @@ class AgentManager(object):
                 conduit)
             collated[typeid] = units
         units = collated.join()
-        agent = PulpAgent(consumer)
-        agent.content.uninstall(units, options)
+        context = Context(consumer, task_id=task_id, consumer_id=consumer_id)
+        agent = PulpAgent()
+        agent.content.uninstall(context, units, options)
+        history_manager = managers.consumer_history_manager()
+        history_manager.record_event(consumer_id, 'content_unit_uninstalled', {'units': units})
+        return task
 
     def cancel_request(self, consumer_id, task_id):
         """
@@ -222,10 +311,12 @@ class AgentManager(object):
         """
         manager = managers.consumer_manager()
         consumer = manager.get_consumer(consumer_id)
-        agent = PulpAgent(consumer)
-        agent.cancel(task_id)
+        context = Context(consumer)
+        agent = PulpAgent()
+        agent.cancel(context, task_id)
 
-    def __invoke_plugin(self, call, *args, **kwargs):
+    @staticmethod
+    def _invoke_plugin(call, *args, **kwargs):
         try:
             return call(*args, **kwargs)
         except InvalidUnitsRequested, e:
@@ -234,7 +325,8 @@ class AgentManager(object):
         except Exception:
             raise PulpExecutionException(), None, sys.exc_info()[2]
 
-    def __profiler(self, typeid):
+    @staticmethod
+    def _profiler(typeid):
         """
         Find the profiler.
         Returns the Profiler base class when not matched.
@@ -250,13 +342,15 @@ class AgentManager(object):
             cfg = {}
         return plugin, cfg
 
-    def __profiled_consumer(self, consumer_id):
+    @staticmethod
+    def _profiled_consumer(consumer_id):
         """
         Get a profiler consumer model object.
-        :param id: A consumer ID.
-        :type id: str
+
+        :param consumer_id: A consumer ID.
+        :type  consumer_id: str
         :return: A populated profiler consumer model object.
-        :rtype: L{ProfiledConsumer}
+        :rtype:  pulp.plugins.model.Consumer
         """
         profiles = {}
         manager = managers.consumer_profile_manager()
@@ -266,14 +360,14 @@ class AgentManager(object):
             profiles[typeid] = profile
         return ProfiledConsumer(consumer_id, profiles)
 
-    def __bindings(self, bindings):
+    @staticmethod
+    def _bindings(bindings):
         """
         Build the bindings needed by the agent. The returned bindings will be
         the payload created by the appropriate distributor.
 
         :param bindings: a list of binding object retrieved from the database
         :type  bindings: list
-
         :return: list of binding objects to send to the agent
         :rtype: list
         """
@@ -293,7 +387,8 @@ class AgentManager(object):
             agent_bindings.append(agent_binding)
         return agent_bindings
 
-    def __unbindings(self, bindings):
+    @staticmethod
+    def _unbindings(bindings):
         """
         Build the (un)bindings needed by the agent.
         :param bindings: A list of binding IDs.
@@ -313,11 +408,52 @@ class AgentManager(object):
                     binding['distributor_id'])
                 type_id = distributor['distributor_type_id']
             except MissingResource:
-                # may have been deleted
+                # In case the distributor was already deleted from the server.
                 type_id = None
             agent_binding = dict(type_id=type_id, repo_id=binding['repo_id'])
             agent_bindings.append(agent_binding)
         return agent_bindings
+
+    @staticmethod
+    def delete_queue(url, name, consumer_id):
+        """
+        Delete the agent queue.
+        :param url: The broker URL.
+        :type url: str
+        :param name: The queue name.
+        :type name: str
+        :param consumer_id: The consumer ID.
+        :type consumer_id: str
+        """
+        try:
+            manager = managers.consumer_manager()
+            manager.get_consumer(consumer_id)
+            return  # still registered (abort)
+        except MissingResource:
+            # expected
+            pass
+        agent = PulpAgent()
+        agent.delete_queue(url, name)
+
+
+@task(base=Task)
+def delete_queue(url, name, consumer_id):
+    """
+    Task to delete the agent queue.
+    :param url: The broker URL.
+    :type url: str
+    :param name: The queue name.
+    :type name: str
+    :param consumer_id: The consumer ID.
+    :type consumer_id: str
+    """
+    try:
+        AgentManager.delete_queue(url, name, consumer_id)
+    except Exception, e:
+        delete_queue.retry(countdown=QUEUE_DELETE_DELAY)
+        logger.error(QUEUE_DELETE_FAILED, {'name': name, 'reason': e})
+    else:
+        logger.info(QUEUE_DELETED, {'name': name})
 
 
 class Units(dict):
@@ -331,6 +467,7 @@ class Units(dict):
         :param units: A list of content units.
         :type units: list
         """
+        super(Units, self).__init__()
         for unit in units:
             typeid = unit['type_id']
             lst = self.get(typeid)

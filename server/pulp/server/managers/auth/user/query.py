@@ -1,33 +1,13 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 """
 Contains users query classes
 """
 
 from gettext import gettext as _
-from logging import getLogger
 
 from pulp.server.db.model.auth import User, Permission, Role
 from pulp.server.exceptions import PulpDataException, MissingResource
 from pulp.server.managers import factory
-
-
-# -- constants ----------------------------------------------------------------
-
-_LOG = getLogger(__name__)
-
-# -- manager ------------------------------------------------------------------
+from pulp.server.managers.auth.role.cud import SUPER_USER_ROLE
 
 
 class UserQueryManager(object):
@@ -49,7 +29,6 @@ class UserQueryManager(object):
             user.pop('password')
         return all_users
 
-
     def find_by_login(self, login):
         """
         Returns a serialized version of the given user if it exists.
@@ -58,9 +37,8 @@ class UserQueryManager(object):
         @return: serialized data describing the user
         @rtype:  dict or None
         """
-        user = User.get_collection().find_one({'login' : login})
+        user = User.get_collection().find_one({'login': login})
         return user
-
 
     def find_by_login_list(self, login_list):
         """
@@ -74,11 +52,10 @@ class UserQueryManager(object):
         @return: list of serialized users
         @rtype:  list of dict
         """
-        users = list(User.get_collection().find({'login' : {'$in' : login_list}}))
+        users = list(User.get_collection().find({'login': {'$in': login_list}}))
         for user in users:
             user.pop('password')
         return users
-
 
     def find_users_belonging_to_role(self, role_id):
         """
@@ -90,7 +67,7 @@ class UserQueryManager(object):
         @rtype: list of L{pulp.server.db.model.auth.User} instances
         @return: list of users that are members of the given role
         """
-        role = Role.get_collection().find_one({'id' : role_id})
+        role = Role.get_collection().find_one({'id': role_id})
         if role is None:
             raise MissingResource(role_id)
 
@@ -99,7 +76,6 @@ class UserQueryManager(object):
             if role_id in user['roles']:
                 users.append(user)
         return users
-
 
     def is_superuser(self, login):
         """
@@ -111,13 +87,11 @@ class UserQueryManager(object):
         @rtype: bool
         @return: True if the user is a super user, False otherwise
         """
-        user = User.get_collection().find_one({'login' : login})
+        user = User.get_collection().find_one({'login': login})
         if user is None:
             raise MissingResource(login)
 
-        role_manager = factory.role_manager()
-        return role_manager.super_user_role in user['roles']
-
+        return SUPER_USER_ROLE in user['roles']
 
     def is_authorized(self, resource, login, operation):
         """
@@ -146,14 +120,13 @@ class UserQueryManager(object):
             current_resource = '/%s/' % '/'.join(parts)
             permission = permission_query_manager.find_by_resource(current_resource)
             if permission is not None:
-                if operation in permission['users'].get(login, []):
+                if operation in permission_query_manager.find_user_permission(permission, login):
                     return True
             parts = parts[:-1]
 
-        permission = Permission.get_collection().find_one({'resource' : '/'})
+        permission = Permission.get_collection().find_one({'resource': '/'})
         return (permission is not None and
-                operation in permission['users'].get(login, []))
-
+                operation in permission_query_manager.find_user_permission(permission, login))
 
     def is_last_super_user(self, login):
         """
@@ -167,20 +140,18 @@ class UserQueryManager(object):
 
         @raise PulpDataException: if no super users are found
         """
-        user = User.get_collection().find_one({'login' : login})
-        role_manager = factory.role_manager()
-        if role_manager.super_user_role not in user['roles']:
+        user = User.get_collection().find_one({'login': login})
+        if SUPER_USER_ROLE not in user['roles']:
             return False
 
-        users = self.find_users_belonging_to_role(role_manager.super_user_role)
+        users = self.find_users_belonging_to_role(SUPER_USER_ROLE)
         if not users:
             raise PulpDataException(_('no super users defined'))
 
         if len(users) >= 2:
             return False
 
-        return users[0]['_id'] == user['_id'] # this should be True
-
+        return users[0]['_id'] == user['_id']  # this should be True
 
     @staticmethod
     def find_by_criteria(criteria):

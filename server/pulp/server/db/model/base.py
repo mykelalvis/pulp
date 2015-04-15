@@ -1,18 +1,20 @@
-# Copyright (c) 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-from pymongo import DESCENDING
+import logging
+from mongoengine.queryset import QuerySet
+from pymongo import DESCENDING, ASCENDING
 
 from pulp.server.compat import ObjectId
 from pulp.server.db.connection import get_collection
+
+
+_logger = logging.getLogger(__name__)
+
+
+class DoesNotExist(Exception):
+    """
+    This Exception can be raised by Managers or Models if they are asked to perform operations on
+    records that do not exist.
+    """
+    pass
 
 
 class Model(dict):
@@ -51,14 +53,13 @@ class Model(dict):
     # or form unique sets of values.
 
     collection_name = None
-    unique_indices = ('id',) # note, '_id' is automatically unique and indexed
+    unique_indices = ('id',)  # note, '_id' is automatically unique and indexed
     search_indices = ()
-
-    # -------------------------------------------------------------------------
+    _collection = None
 
     def __init__(self):
         self._id = ObjectId()
-        self.id = str(self._id) # legacy behavior, would love to rid ourselves of this
+        self.id = str(self._id)  # legacy behavior, would love to rid ourselves of this
 
     # XXX only for use in constructors
     # dict to dot-notation mapping methods
@@ -100,23 +101,101 @@ class Model(dict):
         return collection
 
     @classmethod
-    def _get_cached_collection(cls):
-        try:
-            return cls.__collection
-        except AttributeError:
-            return None
-
-    @classmethod
     def get_collection(cls):
         """
         Get the document collection for this data model.
-        @rtype: pymongo.collection.Collection instance or None
-        @return: the document collection if associated with one, None otherwise
+        :return: the document collection if associated with one, None otherwise
+        :rtype: pymongo.collection.Collection instance or None
         """
         # not all data models are associated with a document collection
         # provide mechanism for sub-documents by not defining the
         # collection_name
         if cls.collection_name is None:
             return None
-        # removed cached connections to handle AutoReconnect exception
-        return cls._get_collection_from_db()
+        if not cls._collection:
+            cls._collection = cls._get_collection_from_db()
+        return cls._collection
+
+
+class CriteriaQuerySet(QuerySet):
+    """
+    This class defines a custom QuerySet to support searching by Criteria object
+    which is a Pulp custom query object.
+
+    This can be set to the 'queryset_class' attribute of the 'meta' directory
+    in the model classes inherited from mongoengine.Document. See TaskStatus model
+    for reference.
+    """
+
+    def find_by_criteria(self, criteria):
+        """
+        Run a query with a Pulp custom query object
+        :param criteria: Criteria object specifying the query to run
+        :type  criteria: pulp.server.db.model.criteria.Criteria
+        :return: mongoengine queryset object
+        :rtype:  mongoengine.queryset.QuerySet
+        """
+        query_set = self
+        if criteria.spec is not None:
+            query_set = query_set.filter(**criteria.spec)
+
+        if criteria.fields is not None:
+            query_set = query_set.only(*criteria.fields)
+
+        sort_list = []
+        if criteria.sort is not None:
+            for (sort_by, order) in criteria.sort:
+                if order == ASCENDING:
+                    sort_list.append("+" + sort_by)
+                else:
+                    sort_list.append("-" + sort_by)
+            if sort_list:
+                query_set = query_set.order_by(*sort_list)
+
+        if criteria.skip is not None:
+            query_set = query_set.skip(criteria.skip)
+
+        if criteria.limit is not None:
+            query_set = query_set.limit(criteria.limit)
+
+        return query_set
+
+    def update(self, *args, **kwargs):
+        """
+        This method emulates post_save() on Documents.
+
+        It attempts to call post_save() on each Document in the query set. If
+        post_save() does not exist, it will do nothing.
+
+        """
+        super(CriteriaQuerySet, self).update(*args, **kwargs)
+        for doc in self:
+            try:
+                doc.post_save(type(doc).__name__, doc)
+            except AttributeError:
+                # if post_save() is not defined for this particular document, that's ok
+                pass
+
+    def update_one(self, *args, **kwargs):
+        """
+        Mongoengine 0.7's QuerySet.update_one() does not call update() but
+        instead just makes a slightly different pymongo call[1]. We need to
+        subclass both methods.
+
+        Also, we cannot simply call super()'s update_one here! In Mongoengine
+        0.8, update_one() simply calls update(). This invokes *OUR* update()
+        method since 'self' is this class and not the superclass. This causes
+        the post_save hook to get fired twice. Instead, we call update() with
+        "multi=False" which mimics the behavior of update_one(). In the
+        unlikely event that someone really does want to use "multi", we raise an
+        exception.
+
+        Once we are rid of 0.7 we can get rid of this method entirely.
+
+        [1] http://tinyurl.com/nf7fafy
+
+        """
+        if 'multi' in kwargs:
+            raise NotImplementedError("The 'multi' parameter cannot be set on this method.")
+        kwargs['multi'] = False
+        self.update(*args, **kwargs)

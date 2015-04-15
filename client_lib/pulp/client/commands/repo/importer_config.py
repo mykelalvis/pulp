@@ -1,31 +1,16 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 from gettext import gettext as _
 
-from pulp.client import parsers
-from pulp.client import arg_utils
+from pulp.client import arg_utils, parsers
 from pulp.client.extensions.extensions import PulpCliOption, PulpCliOptionGroup
 from pulp.common.plugins import importer_constants as constants
 
-# -- group names --------------------------------------------------------------
 
 GROUP_NAME_SYNC = _('Synchronization')
 GROUP_NAME_THROTTLING = _('Throttling')
 GROUP_NAME_SSL = _('Feed SSL')
 GROUP_NAME_PROXY = _('Feed Proxy')
-GROUP_NAME_UNIT_POLICY = _('Repository Contents Behavior')
+GROUP_NAME_UNIT_POLICY = _('Repository Content Behavior')
 
-# -- classes ------------------------------------------------------------------
 
 class OptionsBundle(object):
     """
@@ -38,9 +23,7 @@ class OptionsBundle(object):
     """
 
     def __init__(self):
-
-        # -- synchronization options --------------------------------------------------
-
+        # synchronization options
         d = _('URL of the external source repository to sync')
         self.opt_feed = PulpCliOption('--feed', d, required=False)
 
@@ -49,9 +32,8 @@ class OptionsBundle(object):
         self.opt_validate = PulpCliOption('--validate', d, required=False,
                                           parse_func=parsers.pulp_parse_optional_boolean)
 
-        # -- proxy options ------------------------------------------------------------
-
-        d = _('hostname of the proxy server to use')
+        # proxy options
+        d = _('proxy server url to use')
         self.opt_proxy_host = PulpCliOption('--proxy-host', d, required=False)
 
         d = _('port on the proxy server to make requests')
@@ -64,8 +46,7 @@ class OptionsBundle(object):
         d = _('password used to authenticate with the proxy server')
         self.opt_proxy_pass = PulpCliOption('--proxy-pass', d, required=False)
 
-        # -- throttling options -------------------------------------------------------
-
+        # throttling options
         d = _('maximum bandwidth used per download thread, in bytes/sec, when '
               'synchronizing the repo')
         self.opt_max_speed = PulpCliOption('--max-speed', d, required=False,
@@ -75,8 +56,7 @@ class OptionsBundle(object):
         self.opt_max_downloads = PulpCliOption('--max-downloads', d, required=False,
                                                parse_func=parsers.pulp_parse_optional_positive_int)
 
-        # -- ssl options --------------------------------------------------------------
-
+        # ssl options
         d = _('full path to the CA certificate that should be used to verify the '
               'external repo server\'s SSL certificate')
         self.opt_feed_ca_cert = PulpCliOption('--feed-ca-cert', d, required=False)
@@ -86,22 +66,25 @@ class OptionsBundle(object):
         self.opt_verify_feed_ssl = PulpCliOption('--verify-feed-ssl', d, required=False,
                                                  parse_func=parsers.pulp_parse_optional_boolean)
 
-        d = _('full path to the certificate to use for authorization when accessing the external feed')
+        d = _('full path to the certificate to use for authorization when accessing the external '
+              'feed')
         self.opt_feed_cert = PulpCliOption('--feed-cert', d, required=False)
 
         d = _('full path to the private key for feed_cert')
         self.opt_feed_key = PulpCliOption('--feed-key', d, required=False)
 
-        # -- unit policy --------------------------------------------------------------
-
+        # unit policy
         d = _('if "true", units that were previously in the external feed but are no longer '
               'found will be removed from the repository')
         self.opt_remove_missing = PulpCliOption('--remove-missing', d, required=False,
                                                 parse_func=parsers.pulp_parse_optional_boolean)
 
         d = _('count indicating how many non-latest versions of a unit to keep in a repository')
-        self.opt_retain_old_count = PulpCliOption('--retain-old-count', d, required=False,
-                                                  parse_func=parsers.pulp_parse_optional_nonnegative_int)
+        self.opt_retain_old_count = PulpCliOption(
+            '--retain-old-count',
+            d, required=False,
+            parse_func=parsers.pulp_parse_optional_nonnegative_int
+        )
 
 
 class ImporterConfigMixin(object):
@@ -109,7 +92,8 @@ class ImporterConfigMixin(object):
     Mixin to add to a command that will provide options on the CLI to accept the standard
     configuration values for a Pulp importer. This mixin also provides a method to parse
     the submitted user input and generate a config dict suitable for an importer
-    config values. The produced configuration uses the keys in pulp.common.plugins.importer_constants.
+    config values. The produced configuration uses the keys in
+    pulp.common.plugins.importer_constants.
 
     Touch points are provided to manipulate the options created by this mixin for each group
     (the populate_* methods). If options are added through overridden versions of those methods,
@@ -284,7 +268,8 @@ class ImporterConfigMixin(object):
         for config_key, input_key in key_tuples:
             safe_parse(user_input, config, input_key, config_key)
 
-        arg_utils.convert_file_contents(('ssl_ca_cert', 'ssl_client_cert', 'ssl_client_key'), config)
+        arg_utils.convert_file_contents(('ssl_ca_cert', 'ssl_client_cert', 'ssl_client_key'),
+                                        config)
 
         return config
 
@@ -339,7 +324,8 @@ class ImporterConfigMixin(object):
         """
         key_tuples = (
             (constants.KEY_UNITS_REMOVE_MISSING, self.options_bundle.opt_remove_missing.keyword),
-            (constants.KEY_UNITS_RETAIN_OLD_COUNT, self.options_bundle.opt_retain_old_count.keyword),
+            (constants.KEY_UNITS_RETAIN_OLD_COUNT,
+             self.options_bundle.opt_retain_old_count.keyword),
         )
 
         config = {}
